@@ -1,3 +1,28 @@
+rmpd (0.5.0+native3) unstable; urgency=medium
+
+  * Add rmpd-library regression/integration tests for invalid parameters and
+    edge cases in compatibility suite:
+    - metadata errors for missing files and supported-extension boundaries
+    - CUE parser malformed track/index handling and INDEX00 fallback behavior
+    - database invalid path/playlist parameter errors and post-error
+      operational sanity checks
+  * Validate changes with `cargo test -p rmpd-library`.
+
+ -- ibiscum <>  Sat, 04 Jul 2026 01:44:18 +0200
+
+rmpd (0.5.0+native2) unstable; urgency=medium
+
+  * Add rmpd-core invalid-input regression and integration coverage for:
+    - filter parser edge cases (empty input, dangling operators,
+      unterminated/unquoted values, and unbalanced parenthesis)
+    - config loading/validation failures (missing file, malformed TOML,
+      and nonexistent music_directory)
+    - storage backend invalid parameters (invalid URI format,
+      unsupported protocol, and non-UTF-8 mountpoint handling on Unix)
+  * Validate changes with `cargo test -p rmpd-core --features test-utils`.
+
+ -- ibiscum <>  Sat, 04 Jul 2026 01:38:52 +0200
+
 rmpd (0.5.0+native1) unstable; urgency=medium
 
   * Add Debian packaging scaffold for building a binary package with
