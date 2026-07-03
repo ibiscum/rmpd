@@ -16,7 +16,7 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -52,7 +52,7 @@ jobs:
         rust: [stable, nightly]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -85,7 +85,7 @@ jobs:
     name: Compatibility Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -134,7 +134,7 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -167,7 +167,7 @@ jobs:
     name: Lint Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -187,7 +187,7 @@ jobs:
     name: Debian Package Smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install packaging dependencies
         run: |
@@ -227,7 +227,7 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
