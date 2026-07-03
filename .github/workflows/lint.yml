@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate renovate.json
-        uses: suzuki-shunsuke/github-action-renovate-config-validator@v1.1.0
+        uses: suzuki-shunsuke/github-action-renovate-config-validator@v2.1.0
         with:
           config_file_path: .github/renovate.json
           strict: false
