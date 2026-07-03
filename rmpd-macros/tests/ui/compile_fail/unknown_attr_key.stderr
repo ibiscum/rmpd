@@ -1,0 +1,5 @@
+error: unknown attribute key; expected `name` or `permission`
+ --> tests/ui/compile_fail/unknown_attr_key.rs:5:30
+  |
+5 |     #[command(name = "play", role = 4)]
+  |                              ^^^^

@@ -1,3 +1,17 @@
+rmpd (0.5.0+native4) unstable; urgency=medium
+
+  * Add rmpd-macros regression and integration test coverage for
+    CommandMetadata derive behavior:
+    - integration test for unit, named-field, and tuple variants,
+      including default permission handling
+    - compile-fail trybuild UI cases for invalid parameters and input,
+      including non-enum derive target, missing command name,
+      unknown attribute key, wrong literal types, and out-of-range
+      permission values
+  * Validate changes with `cargo test -p rmpd-macros`.
+
+ -- ibiscum <>  Sat, 04 Jul 2026 01:51:13 +0200
+
 rmpd (0.5.0+native3) unstable; urgency=medium
 
   * Add rmpd-library regression/integration tests for invalid parameters and

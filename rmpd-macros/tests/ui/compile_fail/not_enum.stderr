@@ -1,0 +1,7 @@
+error: CommandMetadata can only be derived for enums
+ --> tests/ui/compile_fail/not_enum.rs:4:1
+  |
+4 | / struct NotAnEnum {
+5 | |     value: u8,
+6 | | }
+  | |_^
