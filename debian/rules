@@ -3,6 +3,8 @@
 export DH_VERBOSE = 1
 export CARGO_BUILD_JOBS = 1
 export CARGO_INCREMENTAL = 0
+export CARGO_HOME = $(CURDIR)/.cargo
+export CARGO_NET_GIT_FETCH_WITH_CLI = true
 export CARGO_TARGET_DIR = $(CURDIR)/target
 export RUST_BACKTRACE = 0
 

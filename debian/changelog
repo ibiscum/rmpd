@@ -1,4 +1,4 @@
-rmpd (0.5.0+native4) unstable; urgency=medium
+rmpd (0.5.0+native4) trixie; urgency=medium
 
   * Add rmpd-macros regression and integration test coverage for
     CommandMetadata derive behavior:
@@ -10,7 +10,7 @@ rmpd (0.5.0+native4) unstable; urgency=medium
       permission values
   * Validate changes with `cargo test -p rmpd-macros`.
 
- -- ibiscum <>  Sat, 04 Jul 2026 01:51:13 +0200
+ -- ibiscum <ibiscum@users.noreply.github.com>  Sat, 04 Jul 2026 01:51:13 +0200
 
 rmpd (0.5.0+native3) unstable; urgency=medium
 
@@ -22,7 +22,7 @@ rmpd (0.5.0+native3) unstable; urgency=medium
       operational sanity checks
   * Validate changes with `cargo test -p rmpd-library`.
 
- -- ibiscum <>  Sat, 04 Jul 2026 01:44:18 +0200
+ -- ibiscum <ibiscum@users.noreply.github.com>  Sat, 04 Jul 2026 01:44:18 +0200
 
 rmpd (0.5.0+native2) unstable; urgency=medium
 
@@ -35,7 +35,7 @@ rmpd (0.5.0+native2) unstable; urgency=medium
       unsupported protocol, and non-UTF-8 mountpoint handling on Unix)
   * Validate changes with `cargo test -p rmpd-core --features test-utils`.
 
- -- ibiscum <>  Sat, 04 Jul 2026 01:38:52 +0200
+ -- ibiscum <ibiscum@users.noreply.github.com>  Sat, 04 Jul 2026 01:38:52 +0200
 
 rmpd (0.5.0+native1) unstable; urgency=medium
 
@@ -46,7 +46,7 @@ rmpd (0.5.0+native1) unstable; urgency=medium
   * Add a root `build.sh` wrapper modeled on `ibiscum/acr` for `sbuild`
     builds.
 
- -- ibiscum <>  Sat, 04 Jul 2026 00:43:07 +0200
+ -- ibiscum <ibiscum@users.noreply.github.com>  Sat, 04 Jul 2026 00:43:07 +0200
 
 rmpd (0.5.0-1) unstable; urgency=medium
 
@@ -60,4 +60,4 @@ rmpd (0.5.0-1) unstable; urgency=medium
     command_list_end, preserving earlier list_OK markers and reporting the
     correct failing command index for parse errors.
 
- -- ibiscum <>  Sat, 04 Jul 2026 00:08:52 +0200
+ -- ibiscum <ibiscum@users.noreply.github.com>  Sat, 04 Jul 2026 00:08:52 +0200

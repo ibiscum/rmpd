@@ -26,13 +26,81 @@
 
 ```
 rmpd/
-├── rmpd/               # Main binary
-├── rmpd-core/          # Core types and traits
-├── rmpd-protocol/      # MPD protocol implementation
-├── rmpd-player/        # Audio playback engine
-├── rmpd-library/       # Music library/database
-├── rmpd-plugin/        # Plugin system
-└── rmpd-stream/        # Streaming support
+├── rmpd/               # Main daemon binary (CLI, startup wiring)
+├── rmpd-core/          # Shared domain types, errors, config, queue/state
+├── rmpd-protocol/      # MPD protocol parsing/command handling/MPRIS/mDNS
+├── rmpd-player/        # Playback engine, outputs, resampling, crossfade
+├── rmpd-library/       # Scanner, metadata/artwork extraction, SQLite DB
+├── rmpd-source/        # External music source bridge (OpenSubsonic feature)
+├── rmpd-plugin/        # Plugin/source traits and abstractions
+├── rmpd-stream/        # HTTP/ICY stream input helpers
+└── rmpd-macros/        # Proc-macros (CommandMetadata derive)
+```
+
+### Workspace Directory Analysis (rmpd*)
+
+- **rmpd/**
+  - Contains the `rmpd` executable entrypoint and top-level runtime wiring.
+  - Feature flags fan out from here: `pipewire` (player backend) and `subsonic` (source integration).
+- **rmpd-core/**
+  - Foundational crate used by most others.
+  - Owns shared config/state types and feature-gated error domains (`database-errors`, `player-errors`, `library-errors`, `protocol-errors`).
+- **rmpd-protocol/**
+  - Implements MPD command parsing/dispatch and protocol-facing behavior.
+  - Depends on `rmpd-macros` for command metadata derive and integrates MPRIS + mDNS.
+- **rmpd-player/**
+  - Audio pipeline crate: decoders, output backends, resampler/crossfade/gain.
+  - Optional Linux-native PipeWire backend behind `pipewire` feature.
+- **rmpd-library/**
+  - Library/database subsystem with scanner, watcher, metadata/artwork, and SQLite/Tantivy-backed search.
+  - Includes fingerprint support and integration tests/compatibility suite.
+- **rmpd-source/**
+  - Source integration layer; `subsonic` feature pulls OpenSubsonic/HTTP dependencies.
+  - Bridges remote catalogs into local browse/play paths.
+- **rmpd-plugin/**
+  - Lightweight abstractions and async traits for pluggable sources/components.
+- **rmpd-stream/**
+  - Streaming utility crate for HTTP/ICY input used by playback/source paths.
+- **rmpd-macros/**
+  - Proc-macro crate for compile-time metadata generation (`#[derive(CommandMetadata)]`).
+
+### Crate Dependency Diagram
+
+```mermaid
+flowchart LR
+    rmpd[rmpd\nmain daemon]
+    core[rmpd-core]
+    protocol[rmpd-protocol]
+    player[rmpd-player]
+    library[rmpd-library]
+    source[rmpd-source]
+    plugin[rmpd-plugin]
+    stream[rmpd-stream]
+    macros[rmpd-macros]
+
+    rmpd --> core
+    rmpd --> protocol
+    rmpd --> player
+    rmpd --> library
+    rmpd --> source
+
+    protocol --> core
+    protocol --> macros
+    protocol --> library
+    protocol --> player
+    protocol --> source
+
+    library --> core
+    library --> player
+
+    source --> core
+    source --> plugin
+    source --> library
+
+    player --> core
+    player --> stream
+
+    plugin --> core
 ```
 
 ## Quick Start
@@ -59,6 +127,44 @@ cargo build --release
 
 ```bash
 ./target/release/rmpd --bind 127.0.0.1 --port 6600 --music-dir ~/Music
+```
+
+### Common Usage
+
+```bash
+# Start with explicit config file
+./target/release/rmpd --config ~/.config/rmpd/rmpd.toml
+
+# Start with journald/syslog-style logging (useful for service-like runs)
+./target/release/rmpd --config ~/.config/rmpd/rmpd.toml --syslog
+```
+
+After startup, any MPD client can connect to `<bind_address>:<port>` from your config.
+
+### Running as a systemd Service
+
+For Debian packaging, the shipped unit is `debian/rmpd.service` and runs:
+
+- user/group: `rmpd:rmpd`
+- working directory: `/var/lib/rmpd`
+- config: `/etc/rmpd/rmpd.toml`
+- command: `/usr/bin/rmpd --config /etc/rmpd/rmpd.toml --syslog`
+
+Typical service workflow:
+
+```bash
+# Reload unit files after installation or manual unit changes
+sudo systemctl daemon-reload
+
+# Enable on boot and start now
+sudo systemctl enable --now rmpd.service
+
+# Check health and recent logs
+systemctl status rmpd.service
+journalctl -u rmpd.service -n 200 --no-pager
+
+# Restart after config changes
+sudo systemctl restart rmpd.service
 ```
 
 ### Test with mpc
