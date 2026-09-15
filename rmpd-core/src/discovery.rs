@@ -16,7 +16,7 @@ pub struct NetworkNeighbor {
 pub struct DiscoveryCache {
     /// List of discovered neighbors
     neighbors: Vec<NetworkNeighbor>,
-    /// Timestamp of last successful scan
+    /// Timestamp of last completed scan (including empty results)
     last_scan: Option<Instant>,
     /// Time-to-live for cached results
     ttl: Duration,
@@ -32,14 +32,17 @@ impl DiscoveryCache {
         }
     }
 
-    /// Check if cache is still valid
+    /// Check if cache is still valid.
+    ///
+    /// A cache entry is considered valid for `ttl` after any completed scan,
+    /// even when that scan discovered zero neighbors.
     pub fn is_valid(&self) -> bool {
         self.last_scan
             .map(|last| last.elapsed() < self.ttl)
             .unwrap_or(false)
     }
 
-    /// Update cache with new neighbors
+    /// Update cache with neighbors from a completed scan.
     pub fn update(&mut self, neighbors: Vec<NetworkNeighbor>) {
         self.neighbors = neighbors;
         self.last_scan = Some(Instant::now());

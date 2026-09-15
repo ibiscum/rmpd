@@ -44,3 +44,9 @@ fn invalid_unbalanced_parenthesis_rejected() {
     let msg = parse_error("((artist == 'Radiohead')");
     assert!(msg.contains("Expected ')'"), "unexpected: {msg}");
 }
+
+#[test]
+fn invalid_trailing_tokens_rejected() {
+    let msg = parse_error("(artist == 'Radiohead') garbage");
+    assert!(msg.contains("Unexpected token"), "unexpected: {msg}");
+}
