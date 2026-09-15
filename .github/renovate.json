@@ -10,8 +10,8 @@
     "before 6am on monday"
   ],
   "labels": ["dependencies"],
-  "assignees": ["@M0Rf30"],
-  "reviewers": ["@M0Rf30"],
+  "assignees": ["ibiscum"],
+  "reviewers": ["ibiscum"],
   "packageRules": [
     {
       "description": "Rust dependencies - group minor and patch updates",
@@ -45,13 +45,6 @@
       "matchManagers": ["cargo"],
       "matchDepTypes": ["workspace.dependencies"],
       "prPriority": 10
-    },
-    {
-      "description": "Critical security updates - auto-merge patch/minor",
-      "matchUpdateTypes": ["patch", "minor"],
-      "matchPackagePatterns": ["*"],
-      "automerge": true,
-      "automergeType": "pr"
     },
     {
       "description": "Core async runtime - separate PRs",

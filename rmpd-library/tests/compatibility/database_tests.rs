@@ -769,3 +769,112 @@ fn test_fts_contentless_delete_migration_from_legacy_db() {
     assert_eq!(db2.count_songs().unwrap(), 1);
     assert_eq!(db2.search_songs("legacbeta").unwrap().len(), 1);
 }
+
+#[test]
+fn test_list_directory_recursive_respects_path_boundary() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = temp_dir
+        .path()
+        .join("recur.db")
+        .to_string_lossy()
+        .to_string();
+    let db = rmpd_library::database::Database::open(&db_path).unwrap();
+
+    db.add_song(&make_local_song("rock/song1.flac")).unwrap();
+    db.add_song(&make_local_song("rock/sub/song2.flac")).unwrap();
+    db.add_song(&make_local_song("rockabilly/song3.flac")).unwrap();
+
+    let recursive = db.list_directory_recursive("rock").unwrap();
+    let paths: Vec<&str> = recursive.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(paths.len(), 2, "expected only rock subtree, got: {paths:?}");
+    assert!(paths.contains(&"rock/song1.flac"));
+    assert!(paths.contains(&"rock/sub/song2.flac"));
+    assert!(!paths.contains(&"rockabilly/song3.flac"));
+}
+
+#[test]
+fn test_list_tag_values_fallback_uses_artist_when_albumartist_is_empty() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = temp_dir
+        .path()
+        .join("fallback.db")
+        .to_string_lossy()
+        .to_string();
+    let db = rmpd_library::database::Database::open(&db_path).unwrap();
+
+    let mut fallback_song = make_local_song("music/fallback.flac");
+    fallback_song.tags.push((
+        rmpd_core::song::intern_tag_key("albumartist"),
+        String::new(),
+    ));
+    fallback_song.tags.push((
+        rmpd_core::song::intern_tag_key("artist"),
+        "Fallback Artist".to_string(),
+    ));
+    db.add_song(&fallback_song).unwrap();
+
+    let mut primary_song = make_local_song("music/primary.flac");
+    primary_song.tags.push((
+        rmpd_core::song::intern_tag_key("albumartist"),
+        "Primary Artist".to_string(),
+    ));
+    primary_song.tags.push((
+        rmpd_core::song::intern_tag_key("artist"),
+        "Different Artist".to_string(),
+    ));
+    db.add_song(&primary_song).unwrap();
+
+    let values = db.list_tag_values("albumartist").unwrap();
+    assert!(
+        values.contains(&"Primary Artist".to_string()),
+        "missing primary albumartist value: {values:?}"
+    );
+    assert!(
+        values.contains(&"Fallback Artist".to_string()),
+        "missing fallback artist value for empty albumartist: {values:?}"
+    );
+    assert!(
+        !values.contains(&String::new()),
+        "empty marker should not be present when fallback chain has values: {values:?}"
+    );
+}
+
+#[test]
+fn test_root_resolution_uses_empty_path_row() {
+    use rusqlite::{Connection, params};
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("root.db").to_string_lossy().to_string();
+
+    // Ensure schema exists.
+    rmpd_library::database::Database::open(&db_path).unwrap();
+
+    // Seed multiple parent_id=NULL rows; only path='' is canonical root.
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO directories (path, parent_id, mtime) VALUES (?1, NULL, ?2)",
+        params!["rogue-root", 111i64],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO directories (path, parent_id, mtime) VALUES (?1, NULL, ?2)",
+        params!["", 222i64],
+    )
+    .unwrap();
+    let root_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO directories (path, parent_id, mtime) VALUES (?1, ?2, ?3)",
+        params!["music", root_id, 333i64],
+    )
+    .unwrap();
+    drop(conn);
+
+    let db = rmpd_library::database::Database::open(&db_path).unwrap();
+    let root = db.list_directory("/").unwrap();
+    let root_dirs: Vec<&str> = root.directories.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(
+        root_dirs.contains(&"music"),
+        "root listing must come from path='' row, got: {root_dirs:?}"
+    );
+    assert_eq!(db.get_directory_mtime("/").unwrap(), Some(222));
+}

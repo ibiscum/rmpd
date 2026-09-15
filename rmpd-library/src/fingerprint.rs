@@ -6,6 +6,37 @@ use std::sync::Mutex;
 /// Maximum duration to fingerprint (120 seconds recommended by Chromaprint)
 const MAX_FINGERPRINT_DURATION_SECS: u64 = 120;
 
+fn to_i32_u32(value: u32, field: &str) -> Result<i32> {
+    i32::try_from(value).map_err(|_| {
+        RmpdError::Library(format!(
+            "{field} value {value} exceeds supported chromaprint i32 range"
+        ))
+    })
+}
+
+fn to_i32_usize(value: usize, field: &str) -> Result<i32> {
+    i32::try_from(value).map_err(|_| {
+        RmpdError::Library(format!(
+            "{field} value {value} exceeds supported chromaprint i32 range"
+        ))
+    })
+}
+
+fn max_samples(sample_rate: u32, channels: u8) -> Result<usize> {
+    let per_second = u64::from(sample_rate)
+        .checked_mul(u64::from(channels))
+        .ok_or_else(|| RmpdError::Library("Fingerprint sample budget overflow".to_string()))?;
+    let total = per_second
+        .checked_mul(MAX_FINGERPRINT_DURATION_SECS)
+        .ok_or_else(|| RmpdError::Library("Fingerprint sample budget overflow".to_string()))?;
+    usize::try_from(total)
+        .map_err(|_| RmpdError::Library("Fingerprint sample budget overflow".to_string()))
+}
+
+fn feed_len_for_budget(total_samples: usize, max_samples: usize, samples_read: usize) -> usize {
+    max_samples.saturating_sub(total_samples).min(samples_read)
+}
+
 /// Serializes Chromaprint context creation/destruction.
 ///
 /// `chromaprint_new` / `chromaprint_free` are NOT safe to call concurrently
@@ -56,13 +87,15 @@ impl Fingerprinter {
         // Get audio format info
         let sample_rate = decoder.sample_rate();
         let channels = decoder.channels();
+        let sample_rate_i32 = to_i32_u32(sample_rate, "sample_rate")?;
+        let channels_i32 = to_i32_u32(u32::from(channels), "channels")?;
 
         // Initialize chromaprint with audio format
         // SAFETY: self.ctx is guaranteed to be non-null (checked in new()) and valid for the
         // lifetime of self. chromaprint_start initializes the context with audio format parameters.
         // The sample_rate and channels are valid i32 values derived from the decoder.
         let result = unsafe {
-            chromaprint_sys_next::chromaprint_start(self.ctx, sample_rate as i32, channels as i32)
+            chromaprint_sys_next::chromaprint_start(self.ctx, sample_rate_i32, channels_i32)
         };
 
         if result == 0 {
@@ -72,8 +105,7 @@ impl Fingerprinter {
         }
 
         // Calculate maximum samples to process (120 seconds)
-        let max_samples =
-            (sample_rate as u64 * channels as u64 * MAX_FINGERPRINT_DURATION_SECS) as usize;
+        let max_samples = max_samples(sample_rate, channels)?;
         let mut total_samples = 0;
 
         // Buffer for reading audio data
@@ -90,10 +122,6 @@ impl Fingerprinter {
             // Read samples from decoder
             let samples_read = match decoder.read(&mut f32_buffer) {
                 Ok(n) => n,
-                Err(RmpdError::Player(ref msg)) if msg.contains("end of stream") => {
-                    // Reached end of file
-                    break;
-                }
                 Err(e) => return Err(e),
             };
 
@@ -101,12 +129,19 @@ impl Fingerprinter {
                 break;
             }
 
+            let to_feed = feed_len_for_budget(total_samples, max_samples, samples_read);
+            if to_feed == 0 {
+                break;
+            }
+
             // Convert f32 samples to i16 for chromaprint
             // Clamp to prevent overflow
-            for (i, &sample) in f32_buffer[..samples_read].iter().enumerate() {
+            for (i, &sample) in f32_buffer[..to_feed].iter().enumerate() {
                 let clamped = sample.clamp(-1.0, 1.0);
                 i16_buffer[i] = (clamped * 32767.0) as i16;
             }
+
+            let to_feed_i32 = to_i32_usize(to_feed, "samples_read")?;
 
             // Feed samples to chromaprint
             // SAFETY: self.ctx is valid and non-null (checked in new()). i16_buffer.as_ptr()
@@ -116,7 +151,7 @@ impl Fingerprinter {
                 chromaprint_sys_next::chromaprint_feed(
                     self.ctx,
                     i16_buffer.as_ptr(),
-                    samples_read as i32,
+                    to_feed_i32,
                 )
             };
 
@@ -126,7 +161,7 @@ impl Fingerprinter {
                 ));
             }
 
-            total_samples += samples_read;
+            total_samples += to_feed;
         }
 
         // Finalize fingerprint
@@ -188,6 +223,7 @@ impl Drop for Fingerprinter {
             unsafe {
                 chromaprint_sys_next::chromaprint_free(self.ctx);
             }
+            self.ctx = std::ptr::null_mut();
         }
     }
 }
@@ -209,5 +245,28 @@ mod tests {
         let mut fingerprinter = Fingerprinter::new().unwrap();
         let result = fingerprinter.fingerprint_file(Path::new("/nonexistent/file.mp3"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_feed_len_for_budget_clamps_to_remaining_samples() {
+        assert_eq!(feed_len_for_budget(0, 100, 32), 32);
+        assert_eq!(feed_len_for_budget(90, 100, 32), 10);
+        assert_eq!(feed_len_for_budget(100, 100, 32), 0);
+        assert_eq!(feed_len_for_budget(110, 100, 32), 0);
+    }
+
+    #[test]
+    fn test_i32_conversions_validate_bounds() {
+        assert_eq!(to_i32_u32(48_000, "sample_rate").unwrap(), 48_000);
+        assert!(to_i32_u32(u32::MAX, "sample_rate").is_err());
+
+        assert_eq!(to_i32_usize(4096, "samples_read").unwrap(), 4096);
+        assert!(to_i32_usize((i32::MAX as usize) + 1, "samples_read").is_err());
+    }
+
+    #[test]
+    fn test_max_samples_computation() {
+        let total = max_samples(48_000, 2).unwrap();
+        assert_eq!(total, 48_000 * 2 * MAX_FINGERPRINT_DURATION_SECS as usize);
     }
 }

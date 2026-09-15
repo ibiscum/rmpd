@@ -120,35 +120,31 @@ impl Drop for FilesystemWatcher {
     }
 }
 
+fn is_supported_audio_file(path: &Path) -> bool {
+    if let Some(name) = path.file_name()
+        && name.to_string_lossy().starts_with('.')
+    {
+        return false;
+    }
+
+    let utf8_path = match camino::Utf8PathBuf::from_path_buf(path.to_path_buf()) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    MetadataExtractor::is_supported_file(&utf8_path)
+}
+
 async fn handle_fs_event(
     event: &Event,
     music_dir: &Path,
     db: &Arc<Mutex<Database>>,
     event_bus: &EventBus,
 ) -> Result<()> {
-    // Filter out non-audio files and hidden files
-    let is_audio_file = |path: &Path| -> bool {
-        if let Some(name) = path.file_name()
-            && name.to_string_lossy().starts_with('.')
-        {
-            return false; // Skip hidden files
-        }
-
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| {
-                matches!(
-                    ext.to_lowercase().as_str(),
-                    "mp3" | "flac" | "ogg" | "opus" | "m4a" | "aac" | "wav" | "wv" | "ape" | "mpc"
-                )
-            })
-            .unwrap_or(false)
-    };
-
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             for path in &event.paths {
-                if !is_audio_file(path) {
+                if !is_supported_audio_file(path) {
                     continue;
                 }
 
@@ -161,14 +157,29 @@ async fn handle_fs_event(
                     }
                 };
 
-                let path_str = relative_path.to_string_lossy().to_string();
+                let relative_utf8 = match camino::Utf8PathBuf::from_path_buf(relative_path.to_path_buf()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("skipping non-UTF8 relative path: {:?}", relative_path);
+                        continue;
+                    }
+                };
+                let path_str = relative_utf8.to_string();
 
                 debug!("file created/modified: {}", path_str);
 
                 // Extract metadata
-                let path_buf = camino::Utf8PathBuf::from(path.to_string_lossy().to_string());
+                let path_buf = match camino::Utf8PathBuf::from_path_buf(path.to_path_buf()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("skipping non-UTF8 path: {:?}", path);
+                        continue;
+                    }
+                };
                 match MetadataExtractor::extract_from_file(&path_buf) {
-                    Ok(song) => {
+                    Ok(mut song) => {
+                        song.path = relative_utf8;
+
                         // Database operations need to be done with lock
                         let db_guard = db.lock().await;
 
@@ -197,7 +208,7 @@ async fn handle_fs_event(
         }
         EventKind::Remove(_) => {
             for path in &event.paths {
-                if !is_audio_file(path) {
+                if !is_supported_audio_file(path) {
                     continue;
                 }
 
@@ -206,18 +217,25 @@ async fn handle_fs_event(
                     Err(_) => continue,
                 };
 
-                let path_str = relative_path.to_string_lossy().to_string();
+                let relative_utf8 = match camino::Utf8PathBuf::from_path_buf(relative_path.to_path_buf()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("skipping non-UTF8 relative path: {:?}", relative_path);
+                        continue;
+                    }
+                };
+                let path_str = relative_utf8.as_str();
 
                 debug!("file removed: {}", path_str);
 
                 // Remove from database
                 let db_guard = db.lock().await;
-                db_guard.delete_song_by_path(&path_str)?;
+                db_guard.delete_song_by_path(path_str)?;
                 drop(db_guard);
 
                 // Emit event
                 event_bus.emit(RmpdEvent::SongDeleted {
-                    path: path_str.clone(),
+                    path: path_str.to_string(),
                 });
             }
         }
@@ -227,4 +245,93 @@ async fn handle_fs_event(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_fs_event, is_supported_audio_file};
+    use crate::database::Database;
+    use notify::event::CreateKind;
+    use notify::{Event, EventKind};
+    use rmpd_core::event::{Event as RmpdEvent, EventBus};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::runtime::Builder;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn supported_audio_file_uses_metadata_rules_and_skips_hidden() {
+        assert!(is_supported_audio_file(std::path::Path::new("visible.flac")));
+        assert!(is_supported_audio_file(std::path::Path::new("track.dsf")));
+        assert!(is_supported_audio_file(std::path::Path::new("track.dff")));
+        assert!(!is_supported_audio_file(std::path::Path::new(".hidden.flac")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supported_audio_file_rejects_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let non_utf8 = PathBuf::from(OsString::from_vec(vec![0x66, 0x80, b'.', b'f', b'l', b'a', b'c']));
+        assert!(!is_supported_audio_file(non_utf8.as_path()));
+    }
+
+    #[test]
+    fn create_event_stores_relative_path_and_emits_added() {
+        let rt = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let temp = TempDir::new().expect("temp dir");
+            let music_dir = temp.path().join("music");
+            std::fs::create_dir_all(music_dir.join("album")).expect("create music dirs");
+
+            let fixture = rmpd_core::test_utils::get_fixture(env!("CARGO_MANIFEST_DIR"), "basic.flac");
+            let song_path = music_dir.join("album/song.flac");
+            std::fs::copy(&fixture, &song_path).expect("copy fixture");
+
+            let db_path = temp.path().join("watcher.db");
+            let db = Database::open(db_path.to_str().expect("utf8 db path")).expect("open db");
+            let db = Arc::new(Mutex::new(db));
+
+            let event_bus = EventBus::new();
+            let mut rx = event_bus.subscribe();
+
+            let event = Event {
+                kind: EventKind::Create(CreateKind::Any),
+                paths: vec![song_path.clone()],
+                attrs: Default::default(),
+            };
+
+            handle_fs_event(&event, music_dir.as_path(), &db, &event_bus)
+                .await
+                .expect("handle create event");
+
+            let guard = db.lock().await;
+            let stored_rel = guard
+                .get_song_by_path("album/song.flac")
+                .expect("query by relative path");
+            assert!(stored_rel.is_some(), "expected relative song path in DB");
+
+            let abs_path_str = song_path.to_str().expect("utf8 song path");
+            let stored_abs = guard
+                .get_song_by_path(abs_path_str)
+                .expect("query by absolute path");
+            assert!(stored_abs.is_none(), "absolute path should not be stored");
+            drop(guard);
+
+            let mut saw_added = false;
+            while let Ok(ev) = rx.try_recv() {
+                if let RmpdEvent::SongAdded(song) = ev {
+                    assert_eq!(song.path.as_str(), "album/song.flac");
+                    saw_added = true;
+                }
+            }
+            assert!(saw_added, "expected SongAdded event");
+        });
+    }
 }

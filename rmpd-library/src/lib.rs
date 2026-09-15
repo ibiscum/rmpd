@@ -1,6 +1,6 @@
 #![allow(clippy::cargo_common_metadata)]
 
-// Music library and database
+// Music library APIs: database, scanning, metadata/artwork, fingerprinting, and file watching
 pub mod artwork;
 pub mod cue;
 pub mod database;
