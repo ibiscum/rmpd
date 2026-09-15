@@ -1,4 +1,4 @@
-use rmpd_core::song::{Song, intern_tag_key};
+use rmpd_core::song::{Song, canonical_tag_name, intern_tag_key, is_known_tag_name};
 use rmpd_core::test_utils::create_test_song_with_metadata;
 use std::borrow::Cow;
 
@@ -256,8 +256,22 @@ fn test_song_tag_contains() {
     );
 
     assert!(song.tag_contains("title", "test"));
+    assert!(song.tag_contains("title", "TEST"));
     assert!(song.tag_contains("title", "title"));
     assert!(!song.tag_contains("title", "wrong"));
+}
+
+#[test]
+fn test_canonical_tag_name_preserves_unknown_key() {
+    let name = canonical_tag_name("custom_tag");
+    assert_eq!(name.as_ref(), "custom_tag");
+}
+
+#[test]
+fn test_is_known_tag_name() {
+    assert!(is_known_tag_name("artist"));
+    assert!(is_known_tag_name("ARTIST"));
+    assert!(!is_known_tag_name("custom_tag"));
 }
 
 #[test]
@@ -333,4 +347,96 @@ fn test_song_tag_with_fallback() {
     assert_eq!(song.tag_with_fallback("albumartist"), Some("Test Artist"));
     // artist should return itself
     assert_eq!(song.tag_with_fallback("artist"), Some("Test Artist"));
+}
+
+#[test]
+fn test_song_tag_with_fallback_albumartistsort_chain() {
+    let song = Song {
+        id: 1,
+        path: "test.mp3".into(),
+        duration: None,
+        sample_rate: None,
+        channels: None,
+        bits_per_sample: None,
+        bitrate: None,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        added_at: 0,
+        last_modified: 0,
+        tags: vec![(intern_tag_key("artistsort"), "Artist Sort".to_string())],
+    };
+
+    assert_eq!(song.tag_with_fallback("albumartistsort"), Some("Artist Sort"));
+}
+
+#[test]
+fn test_song_tag_with_fallback_titlesort_chain() {
+    let song = Song {
+        id: 1,
+        path: "test.mp3".into(),
+        duration: None,
+        sample_rate: None,
+        channels: None,
+        bits_per_sample: None,
+        bitrate: None,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        added_at: 0,
+        last_modified: 0,
+        tags: vec![(intern_tag_key("title"), "Track Title".to_string())],
+    };
+
+    assert_eq!(song.tag_with_fallback("titlesort"), Some("Track Title"));
+}
+
+#[test]
+fn test_song_tag_with_fallback_composersort_chain() {
+    let song = Song {
+        id: 1,
+        path: "test.mp3".into(),
+        duration: None,
+        sample_rate: None,
+        channels: None,
+        bits_per_sample: None,
+        bitrate: None,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        added_at: 0,
+        last_modified: 0,
+        tags: vec![(intern_tag_key("composer"), "A Composer".to_string())],
+    };
+
+    assert_eq!(song.tag_with_fallback("composersort"), Some("A Composer"));
+}
+
+#[test]
+fn test_song_tag_values_with_fallback_returns_first_non_empty_chain_values() {
+    let song = Song {
+        id: 1,
+        path: "test.mp3".into(),
+        duration: None,
+        sample_rate: None,
+        channels: None,
+        bits_per_sample: None,
+        bitrate: None,
+        replay_gain_track_gain: None,
+        replay_gain_track_peak: None,
+        replay_gain_album_gain: None,
+        replay_gain_album_peak: None,
+        added_at: 0,
+        last_modified: 0,
+        tags: vec![
+            (intern_tag_key("artist"), "A1".to_string()),
+            (intern_tag_key("artist"), "A2".to_string()),
+        ],
+    };
+
+    let vals = song.tag_values_with_fallback("albumartist");
+    assert_eq!(vals, vec!["A1", "A2"]);
 }

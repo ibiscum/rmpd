@@ -22,9 +22,10 @@ use std::time::Duration;
 /// assert_eq!(song.tag("title"), Some("Song test"));
 /// ```
 pub fn create_test_song(id: u64, name: &str) -> Song {
+    let path_token = sanitize_for_filename(name);
     Song {
         id,
-        path: Utf8PathBuf::from(format!("song{}.mp3", name)),
+        path: Utf8PathBuf::from(format!("song{}.mp3", path_token)),
         duration: None,
         sample_rate: None,
         channels: None,
@@ -165,7 +166,8 @@ impl AudioFormat {
 
 /// Sanitize a string for safe use in filenames.
 ///
-/// Replaces filesystem-unsafe characters and spaces with underscores.
+/// This is a lightweight sanitizer for test fixture filenames/cache keys and
+/// replaces common filesystem-unsafe characters and spaces with underscores.
 pub fn sanitize_for_filename(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -199,6 +201,13 @@ mod tests {
         assert_eq!(song.id, 42);
         assert_eq!(song.tag("title"), Some("Song test"));
         assert_eq!(song.path.as_str(), "songtest.mp3");
+    }
+
+    #[test]
+    fn test_create_test_song_sanitizes_path_component() {
+        let song = create_test_song(1, "a/b:c");
+        assert_eq!(song.path.as_str(), "songa_b_c.mp3");
+        assert_eq!(song.tag("title"), Some("Song a/b:c"));
     }
 
     #[test]
@@ -244,7 +253,10 @@ mod tests {
 
         assert_eq!(AudioFormat::Flac.codec(), "flac");
         assert_eq!(AudioFormat::Mp3.codec(), "libmp3lame");
+        assert_eq!(AudioFormat::Ogg.codec(), "libvorbis");
         assert_eq!(AudioFormat::Opus.codec(), "libopus");
+        assert_eq!(AudioFormat::M4a.codec(), "aac");
+        assert_eq!(AudioFormat::Wav.codec(), "pcm_s16le");
     }
 
     #[test]

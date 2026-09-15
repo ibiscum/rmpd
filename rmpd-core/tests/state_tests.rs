@@ -26,6 +26,21 @@ fn test_player_state_from_atomic_invalid() {
 }
 
 #[test]
+fn test_player_state_to_atomic_mapping() {
+    assert_eq!(PlayerState::Stop.to_atomic(), 0);
+    assert_eq!(PlayerState::Play.to_atomic(), 1);
+    assert_eq!(PlayerState::Pause.to_atomic(), 2);
+}
+
+#[test]
+fn test_player_state_atomic_round_trip() {
+    let states = [PlayerState::Stop, PlayerState::Play, PlayerState::Pause];
+    for state in states {
+        assert_eq!(PlayerState::from_atomic(state.to_atomic()), state);
+    }
+}
+
+#[test]
 fn test_player_state_display() {
     assert_eq!(PlayerState::Stop.to_string(), "stop");
     assert_eq!(PlayerState::Play.to_string(), "play");

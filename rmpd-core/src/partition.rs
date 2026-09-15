@@ -44,7 +44,7 @@ impl PartitionState {
         let event_bus = EventBus::new();
         let status = Arc::new(RwLock::new(PlayerStatus::default()));
         let atomic_state = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::state::PlayerState::Stop as u8,
+            crate::state::PlayerState::Stop.to_atomic(),
         ));
 
         Self {
@@ -67,9 +67,11 @@ impl PartitionState {
     }
 
     /// Remove an output from this partition
-    pub async fn remove_output(&self, output_id: u32) {
+    pub async fn remove_output(&self, output_id: u32) -> bool {
         let mut outputs = self.assigned_outputs.write().await;
+        let before = outputs.len();
         outputs.retain(|&id| id != output_id);
+        outputs.len() != before
     }
 
     /// Get all assigned output IDs
@@ -93,15 +95,7 @@ pub struct PartitionManager {
 impl PartitionManager {
     /// Create a new partition manager with a default partition
     pub fn new() -> Arc<Self> {
-        let mut partitions = HashMap::new();
-        // Always pre-populate the "default" partition — MPD always has it
-        partitions.insert(
-            "default".to_string(),
-            Arc::new(PartitionState::new("default".to_string())),
-        );
-        Arc::new(Self {
-            partitions: RwLock::new(partitions),
-        })
+        Arc::new(Self::default())
     }
 
     /// Create a new partition
@@ -144,7 +138,9 @@ impl PartitionManager {
     /// List all partition names
     pub async fn list_partitions(&self) -> Vec<String> {
         let partitions = self.partitions.read().await;
-        partitions.keys().cloned().collect()
+        let mut names: Vec<String> = partitions.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Get partition count
@@ -177,8 +173,13 @@ impl PartitionManager {
             (from, to)
         }; // Drop read lock here
 
-        // Remove from source
-        from.remove_output(output_id).await;
+        // Remove from source; moving from a partition that does not own the
+        // output is an error and likely indicates stale caller state.
+        if !from.remove_output(output_id).await {
+            return Err(format!(
+                "Output {output_id} not assigned to source partition: {from_partition}"
+            ));
+        }
 
         // Add to target
         to.assign_output(output_id).await;
@@ -204,10 +205,21 @@ impl PartitionManager {
     /// Load partitions from saved info
     pub async fn load_partitions(&self, infos: Vec<PartitionInfo>) {
         for info in infos {
-            if let Ok(partition) = self.create_partition(info.name).await {
-                for output_id in info.output_ids {
-                    partition.assign_output(output_id).await;
+            let name = info.name;
+            let output_ids = info.output_ids;
+            let partition = if let Some(existing) = self.get_partition(&name).await {
+                existing
+            } else {
+                match self.create_partition(name.clone()).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("failed to load partition '{name}': {e}");
+                        continue;
+                    }
                 }
+            };
+            for output_id in output_ids {
+                partition.assign_output(output_id).await;
             }
         }
     }
@@ -215,8 +227,14 @@ impl PartitionManager {
 
 impl Default for PartitionManager {
     fn default() -> Self {
+        let mut partitions = HashMap::new();
+        // Always pre-populate the "default" partition — MPD always has it.
+        partitions.insert(
+            "default".to_string(),
+            Arc::new(PartitionState::new("default".to_string())),
+        );
         Self {
-            partitions: RwLock::new(HashMap::new()),
+            partitions: RwLock::new(partitions),
         }
     }
 }
@@ -282,6 +300,7 @@ mod tests {
         assert!(names.contains(&"part1".to_string()));
         assert!(names.contains(&"part2".to_string()));
         assert!(names.contains(&"default".to_string()));
+        assert_eq!(names, vec!["default", "part1", "part2"]);
     }
 
     #[tokio::test]
@@ -303,11 +322,17 @@ mod tests {
 
         partition.assign_output(0).await;
         partition.assign_output(1).await;
-        partition.remove_output(0).await;
+        assert!(partition.remove_output(0).await);
 
         let outputs = partition.get_outputs().await;
         assert_eq!(outputs.len(), 1);
         assert!(outputs.contains(&1));
+    }
+
+    #[tokio::test]
+    async fn test_remove_output_missing_returns_false() {
+        let partition = PartitionState::new("test".to_string());
+        assert!(!partition.remove_output(42).await);
     }
 
     #[tokio::test]
@@ -323,5 +348,49 @@ mod tests {
 
         assert_eq!(part1.get_outputs().await.len(), 0);
         assert_eq!(part2.get_outputs().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_move_output_rejects_wrong_source_partition() {
+        let manager = PartitionManager::new();
+        let part1 = manager.create_partition("part1".to_string()).await.unwrap();
+        let _part2 = manager.create_partition("part2".to_string()).await.unwrap();
+
+        part1.assign_output(0).await;
+        let err = manager
+            .move_output(0, "part2", "part1")
+            .await
+            .expect_err("move should fail when source does not own output");
+        assert!(err.contains("not assigned to source partition"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_default_impl_contains_default_partition() {
+        let manager = PartitionManager::default();
+        assert_eq!(manager.count().await, 1);
+        assert!(manager.get_partition("default").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_load_partitions_updates_existing_default() {
+        let manager = PartitionManager::new();
+        manager
+            .load_partitions(vec![
+                PartitionInfo {
+                    name: "default".to_string(),
+                    output_ids: vec![7],
+                },
+                PartitionInfo {
+                    name: "room".to_string(),
+                    output_ids: vec![9],
+                },
+            ])
+            .await;
+
+        let default = manager.get_partition("default").await.unwrap();
+        assert!(default.get_outputs().await.contains(&7));
+
+        let room = manager.get_partition("room").await.unwrap();
+        assert!(room.get_outputs().await.contains(&9));
     }
 }

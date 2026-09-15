@@ -196,9 +196,9 @@ pub async fn handle_list_command(
 
         let mut resp = ResponseBuilder::new();
         for (group_val, tag_vals) in &groups {
-            resp.field(group_key, group_val);
+            resp.field(group_key.as_ref(), group_val);
             for tv in tag_vals {
-                resp.field(tag_key, tv);
+                resp.field(tag_key.as_ref(), tv);
             }
         }
         return resp.ok();
@@ -274,9 +274,10 @@ pub async fn handle_list_command(
     };
 
     let mut resp = ResponseBuilder::new();
-    let tag_key = rmpd_core::song::canonical_tag_name(&tag.to_lowercase());
+    let tag_lower = tag.to_lowercase();
+    let tag_key = rmpd_core::song::canonical_tag_name(&tag_lower);
     for value in values {
-        resp.field(tag_key, value);
+        resp.field(tag_key.as_ref(), value);
     }
     resp.ok()
 }
@@ -387,9 +388,10 @@ pub async fn handle_count_command(
         // Sort by tag value (MPD uses std::map which sorts lexicographically)
         let mut sorted: Vec<_> = groups.into_iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let tag_key = rmpd_core::song::canonical_tag_name(&group_tag.to_lowercase());
+        let group_tag_lower = group_tag.to_lowercase();
+        let tag_key = rmpd_core::song::canonical_tag_name(&group_tag_lower);
         for (value, (count, playtime)) in &sorted {
-            resp.field(tag_key, value);
+            resp.field(tag_key.as_ref(), value);
             resp.field("songs", count);
             resp.field("playtime", playtime.floor() as u64);
         }
@@ -1035,9 +1037,10 @@ pub async fn handle_searchcount_command(
         }
         let mut sorted: Vec<_> = groups.into_iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let tag_key = rmpd_core::song::canonical_tag_name(&group_tag.to_lowercase());
+        let group_tag_lower = group_tag.to_lowercase();
+        let tag_key = rmpd_core::song::canonical_tag_name(&group_tag_lower);
         for (val, (count, playtime)) in &sorted {
-            resp.field(tag_key, val);
+            resp.field(tag_key.as_ref(), val);
             resp.field("songs", count);
             resp.field("playtime", playtime.floor() as u64);
         }

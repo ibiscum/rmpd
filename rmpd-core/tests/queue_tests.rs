@@ -199,6 +199,32 @@ fn test_move_by_id() {
 }
 
 #[test]
+fn test_move_by_id_rejects_destination_equal_len() {
+    let mut queue = Queue::new();
+    let id1 = queue.add(create_test_song(1, "song1"));
+    queue.add(create_test_song(2, "song2"));
+    queue.add(create_test_song(3, "song3"));
+
+    let len = queue.len() as u32;
+    let success = queue.move_by_id(id1, len);
+
+    assert!(!success);
+    assert_eq!(queue.get(0).unwrap().id, id1);
+}
+
+#[test]
+fn test_move_bounds_consistent_between_position_and_id() {
+    let mut queue = Queue::new();
+    let id1 = queue.add(create_test_song(1, "song1"));
+    queue.add(create_test_song(2, "song2"));
+    queue.add(create_test_song(3, "song3"));
+
+    let len = queue.len() as u32;
+    assert!(!queue.move_item(0, len));
+    assert!(!queue.move_by_id(id1, len));
+}
+
+#[test]
 fn test_queue_ids_are_unique() {
     let mut queue = Queue::new();
 
@@ -263,4 +289,58 @@ fn test_version_increments() {
     queue.clear();
     let v3 = queue.version();
     assert!(v3 > v2);
+}
+
+#[test]
+fn test_set_priority_range_noop_does_not_bump_version() {
+    let mut queue = Queue::new();
+    queue.add(create_test_song(1, "song1"));
+
+    let v1 = queue.version();
+    let changed = queue.set_priority_range(0, &[(0, 1)]);
+    let v2 = queue.version();
+
+    assert!(!changed);
+    assert_eq!(v2, v1);
+}
+
+#[test]
+fn test_set_range_by_id_noop_does_not_bump_version() {
+    let mut queue = Queue::new();
+    let id = queue.add(create_test_song(1, "song1"));
+
+    assert!(queue.set_range_by_id(id, Some((10.0, 20.0))));
+    let v1 = queue.version();
+
+    assert!(queue.set_range_by_id(id, Some((10.0, 20.0))));
+    let v2 = queue.version();
+
+    assert_eq!(v2, v1);
+}
+
+#[test]
+fn test_add_tag_by_id_noop_does_not_bump_version() {
+    let mut queue = Queue::new();
+    let id = queue.add(create_test_song(1, "song1"));
+
+    assert!(queue.add_tag_by_id(id, "mood".to_string(), "chill".to_string()));
+    let v1 = queue.version();
+
+    assert!(queue.add_tag_by_id(id, "mood".to_string(), "chill".to_string()));
+    let v2 = queue.version();
+
+    assert_eq!(v2, v1);
+}
+
+#[test]
+fn test_clear_specific_missing_tag_noop_does_not_bump_version() {
+    let mut queue = Queue::new();
+    let id = queue.add(create_test_song(1, "song1"));
+    assert!(queue.add_tag_by_id(id, "genre".to_string(), "rock".to_string()));
+
+    let v1 = queue.version();
+    assert!(queue.clear_tags_by_id(id, Some("mood")));
+    let v2 = queue.version();
+
+    assert_eq!(v2, v1);
 }

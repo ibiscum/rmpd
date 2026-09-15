@@ -2,6 +2,7 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::time::Duration;
+use crate::tag::tag_fallback_chain;
 
 /// Well-known MPD tag names. Using static references avoids per-song String allocation.
 pub fn intern_tag_key(key: &str) -> Cow<'static, str> {
@@ -45,44 +46,51 @@ pub fn intern_tag_key(key: &str) -> Cow<'static, str> {
 }
 
 /// Map lowercase tag name to canonical MPD display name.
-pub fn canonical_tag_name(tag: &str) -> &'static str {
-    match tag {
-        "artist" => "Artist",
-        "artistsort" => "ArtistSort",
-        "album" => "Album",
-        "albumsort" => "AlbumSort",
-        "albumartist" => "AlbumArtist",
-        "albumartistsort" => "AlbumArtistSort",
-        "title" => "Title",
-        "titlesort" => "TitleSort",
-        "track" => "Track",
-        "name" => "Name",
-        "genre" => "Genre",
-        "mood" => "Mood",
-        "date" => "Date",
-        "originaldate" => "OriginalDate",
-        "composer" => "Composer",
-        "composersort" => "ComposerSort",
-        "performer" => "Performer",
-        "conductor" => "Conductor",
-        "work" => "Work",
-        "movement" => "Movement",
-        "movementnumber" => "MovementNumber",
-        "ensemble" => "Ensemble",
-        "location" => "Location",
-        "grouping" => "Grouping",
-        "comment" => "Comment",
-        "disc" => "Disc",
-        "label" => "Label",
-        "musicbrainz_artistid" => "MUSICBRAINZ_ARTISTID",
-        "musicbrainz_albumid" => "MUSICBRAINZ_ALBUMID",
-        "musicbrainz_albumartistid" => "MUSICBRAINZ_ALBUMARTISTID",
-        "musicbrainz_trackid" => "MUSICBRAINZ_TRACKID",
-        "musicbrainz_releasetrackid" => "MUSICBRAINZ_RELEASETRACKID",
-        "musicbrainz_releasegroupid" => "MUSICBRAINZ_RELEASEGROUPID",
-        "musicbrainz_workid" => "MUSICBRAINZ_WORKID",
-        _ => "Unknown",
+pub fn canonical_tag_name(tag: &str) -> Cow<'_, str> {
+    let tag_lower = tag.to_lowercase();
+    match tag_lower.as_str() {
+        "artist" => Cow::Borrowed("Artist"),
+        "artistsort" => Cow::Borrowed("ArtistSort"),
+        "album" => Cow::Borrowed("Album"),
+        "albumsort" => Cow::Borrowed("AlbumSort"),
+        "albumartist" => Cow::Borrowed("AlbumArtist"),
+        "albumartistsort" => Cow::Borrowed("AlbumArtistSort"),
+        "title" => Cow::Borrowed("Title"),
+        "titlesort" => Cow::Borrowed("TitleSort"),
+        "track" => Cow::Borrowed("Track"),
+        "name" => Cow::Borrowed("Name"),
+        "genre" => Cow::Borrowed("Genre"),
+        "mood" => Cow::Borrowed("Mood"),
+        "date" => Cow::Borrowed("Date"),
+        "originaldate" => Cow::Borrowed("OriginalDate"),
+        "composer" => Cow::Borrowed("Composer"),
+        "composersort" => Cow::Borrowed("ComposerSort"),
+        "performer" => Cow::Borrowed("Performer"),
+        "conductor" => Cow::Borrowed("Conductor"),
+        "work" => Cow::Borrowed("Work"),
+        "movement" => Cow::Borrowed("Movement"),
+        "movementnumber" => Cow::Borrowed("MovementNumber"),
+        "ensemble" => Cow::Borrowed("Ensemble"),
+        "location" => Cow::Borrowed("Location"),
+        "grouping" => Cow::Borrowed("Grouping"),
+        "comment" => Cow::Borrowed("Comment"),
+        "disc" => Cow::Borrowed("Disc"),
+        "label" => Cow::Borrowed("Label"),
+        "musicbrainz_artistid" => Cow::Borrowed("MUSICBRAINZ_ARTISTID"),
+        "musicbrainz_albumid" => Cow::Borrowed("MUSICBRAINZ_ALBUMID"),
+        "musicbrainz_albumartistid" => Cow::Borrowed("MUSICBRAINZ_ALBUMARTISTID"),
+        "musicbrainz_trackid" => Cow::Borrowed("MUSICBRAINZ_TRACKID"),
+        "musicbrainz_releasetrackid" => Cow::Borrowed("MUSICBRAINZ_RELEASETRACKID"),
+        "musicbrainz_releasegroupid" => Cow::Borrowed("MUSICBRAINZ_RELEASEGROUPID"),
+        "musicbrainz_workid" => Cow::Borrowed("MUSICBRAINZ_WORKID"),
+        _ => Cow::Owned(tag_lower),
     }
+}
+
+/// Whether a tag is a recognized MPD tag type.
+#[must_use]
+pub fn is_known_tag_name(tag: &str) -> bool {
+    matches!(canonical_tag_name(tag), Cow::Borrowed(_))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,19 +145,12 @@ impl Song {
     /// E.g. albumartist falls back to artist, artistsort falls back to artist, etc.
     pub fn tag_with_fallback(&self, name: &str) -> Option<&str> {
         let name_lower = name.to_lowercase();
-        match name_lower.as_str() {
-            "albumartist" => self.tag("albumartist").or_else(|| self.tag("artist")),
-            "artistsort" => self.tag("artistsort").or_else(|| self.tag("artist")),
-            "albumartistsort" => self
-                .tag("albumartistsort")
-                .or_else(|| self.tag("albumartist"))
-                .or_else(|| self.tag("artistsort"))
-                .or_else(|| self.tag("artist")),
-            "albumsort" => self.tag("albumsort").or_else(|| self.tag("album")),
-            "titlesort" => self.tag("titlesort").or_else(|| self.tag("title")),
-            "composersort" => self.tag("composersort").or_else(|| self.tag("composer")),
-            _ => self.tag(&name_lower),
+        for candidate in tag_fallback_chain(&name_lower) {
+            if let Some(v) = self.tag(candidate) {
+                return Some(v);
+            }
         }
+        None
     }
 
     /// Get all values for a tag with MPD-style fallback.
@@ -157,29 +158,13 @@ impl Song {
     /// Otherwise, return fallback tag values.
     pub fn tag_values_with_fallback(&self, name: &str) -> Vec<&str> {
         let name_lower = name.to_lowercase();
-        let primary: Vec<&str> = self.tag_values(&name_lower).collect();
-        if !primary.is_empty() {
-            return primary;
-        }
-        match name_lower.as_str() {
-            "albumartist" => self.tag_values("artist").collect(),
-            "artistsort" => self.tag_values("artist").collect(),
-            "albumartistsort" => {
-                let v: Vec<&str> = self.tag_values("albumartist").collect();
-                if !v.is_empty() {
-                    return v;
-                }
-                let v: Vec<&str> = self.tag_values("artistsort").collect();
-                if !v.is_empty() {
-                    return v;
-                }
-                self.tag_values("artist").collect()
+        for candidate in tag_fallback_chain(&name_lower) {
+            let values: Vec<&str> = self.tag_values(candidate).collect();
+            if !values.is_empty() {
+                return values;
             }
-            "albumsort" => self.tag_values("album").collect(),
-            "titlesort" => self.tag_values("title").collect(),
-            "composersort" => self.tag_values("composer").collect(),
-            _ => Vec::new(),
         }
+        Vec::new()
     }
 
     /// Check if a song's tag matches an exact value (checks all values for multi-valued tags).
@@ -188,9 +173,10 @@ impl Song {
     }
 
     /// Check if a song's tag contains a value (case-insensitive, checks all values for multi-valued tags).
-    pub fn tag_contains(&self, tag: &str, value_lower: &str) -> bool {
+    pub fn tag_contains(&self, tag: &str, value: &str) -> bool {
+        let needle = value.to_lowercase();
         self.tag_values(tag)
-            .any(|v| v.to_lowercase().contains(value_lower))
+            .any(|v| v.to_lowercase().contains(&needle))
     }
 
     pub fn display_title(&self) -> &str {

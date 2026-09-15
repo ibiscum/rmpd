@@ -5,21 +5,33 @@ pub use crate::config::ReplayGainMode;
 use crate::song::AudioFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[repr(u8)]
 pub enum PlayerState {
     #[default]
-    Stop,
-    Play,
-    Pause,
+    Stop = 0,
+    Play = 1,
+    Pause = 2,
 }
 
 impl PlayerState {
+    /// Convert to atomic u8 representation (Stop=0, Play=1, Pause=2)
+    pub const fn to_atomic(self) -> u8 {
+        self as u8
+    }
+
     /// Convert from atomic u8 representation (Stop=0, Play=1, Pause=2)
     pub fn from_atomic(value: u8) -> Self {
         match value {
             0 => Self::Stop,
             1 => Self::Play,
             2 => Self::Pause,
-            _ => Self::Stop,
+            _ => {
+                tracing::warn!(
+                    atomic_value = value,
+                    "invalid PlayerState atomic value; falling back to Stop"
+                );
+                Self::Stop
+            }
         }
     }
 }

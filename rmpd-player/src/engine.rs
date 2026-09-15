@@ -298,7 +298,7 @@ impl PlaybackEngine {
 
         // Update atomic state (caller must update status to avoid deadlock and emit events)
         self.atomic_state
-            .store(PlayerState::Play as u8, Ordering::Release);
+            .store(PlayerState::Play.to_atomic(), Ordering::Release);
 
         Ok(())
     }
@@ -307,8 +307,8 @@ impl PlaybackEngine {
         // Toggle atomic state - caller must update status to avoid deadlock
         let current = self.atomic_state.load(Ordering::Acquire);
         let new_state = match current {
-            1 => PlayerState::Pause as u8, // Play -> Pause
-            2 => PlayerState::Play as u8,  // Pause -> Play
+            v if v == PlayerState::Play.to_atomic() => PlayerState::Pause.to_atomic(),
+            v if v == PlayerState::Pause.to_atomic() => PlayerState::Play.to_atomic(),
             _ => return Ok(()),            // Stop -> do nothing
         };
         self.atomic_state.store(new_state, Ordering::Release);
@@ -320,11 +320,11 @@ impl PlaybackEngine {
         let current = self.atomic_state.load(Ordering::Acquire);
 
         // Only transition if we're playing or paused (not stopped)
-        if current == PlayerState::Play as u8 || current == PlayerState::Pause as u8 {
+        if current == PlayerState::Play.to_atomic() || current == PlayerState::Pause.to_atomic() {
             let new_state = if should_pause {
-                PlayerState::Pause as u8
+                PlayerState::Pause.to_atomic()
             } else {
-                PlayerState::Play as u8
+                PlayerState::Play.to_atomic()
             };
             self.atomic_state.store(new_state, Ordering::Release);
         }
@@ -360,7 +360,7 @@ impl PlaybackEngine {
 
         // Update atomic state (caller must update status to avoid deadlock)
         self.atomic_state
-            .store(PlayerState::Stop as u8, Ordering::Release);
+            .store(PlayerState::Stop.to_atomic(), Ordering::Release);
         *self.current_song.lock() = None;
 
         // Clear the look-ahead; the protocol re-feeds it after play().

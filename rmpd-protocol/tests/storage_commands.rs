@@ -112,6 +112,24 @@ async fn test_listmounts_command() {
 }
 
 #[tokio::test]
+async fn test_listmounts_command_sorted_by_mount_path() {
+    let state = test_state();
+
+    storage::handle_mount_command(&state, "remote/z", "nfs://z/music").await;
+    storage::handle_mount_command(&state, "remote/a", "nfs://a/music").await;
+
+    let response = storage::handle_listmounts_command(&state).await;
+    let a_idx = response
+        .find("mount: remote/a")
+        .expect("missing remote/a mount line");
+    let z_idx = response
+        .find("mount: remote/z")
+        .expect("missing remote/z mount line");
+
+    assert!(a_idx < z_idx, "mount lines should be sorted by path");
+}
+
+#[tokio::test]
 async fn test_protocol_extraction() {
     let state = test_state();
 

@@ -1,10 +1,10 @@
 /// Shared path utilities: tilde expansion and path resolution.
 use camino::Utf8PathBuf;
 
-/// Expand `~/...` to the user's home directory.
+/// Expand `~/...` and bare `~` to the user's home directory.
 pub fn expand_tilde(path: &Utf8PathBuf) -> Utf8PathBuf {
     let path_str = path.as_str();
-    if path_str.starts_with("~/")
+    if (path_str == "~" || path_str.starts_with("~/"))
         && let Some(home) = dirs::home_dir()
         && let Some(home_str) = home.to_str()
     {
@@ -23,14 +23,18 @@ pub fn resolve_path(rel_path: &str, music_dir: Option<&str>) -> String {
     }
 
     if let Some(music_dir) = music_dir {
-        let music_dir = music_dir.trim_end_matches('/');
+        let music_dir = music_dir.trim().trim_end_matches('/');
+        if music_dir.is_empty() {
+            return rel_path.to_string();
+        }
         format!("{music_dir}/{rel_path}")
     } else {
         rel_path.to_string()
     }
 }
 
-/// Whether `s` begins with a URI scheme (`scheme://`), e.g. `http://host/x`.
+/// Whether `s` begins with a URI scheme in the form `scheme://`,
+/// e.g. `http://host/x`.
 /// Used to distinguish remote stream URIs from local relative paths.
 #[must_use]
 pub fn is_uri(s: &str) -> bool {
@@ -77,5 +81,22 @@ mod tests {
             "/abs/song.flac"
         );
         assert_eq!(resolve_path("a/b.flac", Some("/music")), "/music/a/b.flac");
+    }
+
+    #[test]
+    fn resolve_path_with_empty_music_dir_stays_relative() {
+        assert_eq!(resolve_path("a/b.flac", Some("")), "a/b.flac");
+        assert_eq!(resolve_path("a/b.flac", Some("   ")), "a/b.flac");
+    }
+
+    #[test]
+    fn expand_tilde_handles_bare_tilde() {
+        let p = Utf8PathBuf::from("~");
+        let out = expand_tilde(&p);
+        if let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned)) {
+            assert_eq!(out, Utf8PathBuf::from(home));
+        } else {
+            assert_eq!(out, Utf8PathBuf::from("~"));
+        }
     }
 }
