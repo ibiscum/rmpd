@@ -71,6 +71,42 @@ pub struct Artwork {
 pub struct MetadataExtractor;
 
 impl MetadataExtractor {
+    fn read_vorbis_pairs_for_file_type(
+        path: &Utf8PathBuf,
+        file_type: lofty::file::FileType,
+    ) -> Result<Vec<(String, String)>> {
+        match file_type {
+            lofty::file::FileType::Flac => {
+                let file = std::fs::File::open(path.as_str())
+                    .map_err(|e| RmpdError::Library(format!("Failed to open file: {e}")))?;
+                let mut reader = BufReader::new(file);
+                let flac = FlacFile::read_from(&mut reader, ParseOptions::default())
+                    .map_err(|e| RmpdError::Library(format!("Failed to read FLAC: {e}")))?;
+                Ok(flac
+                    .vorbis_comments()
+                    .map(collect_vorbis_pairs)
+                    .unwrap_or_default())
+            }
+            lofty::file::FileType::Vorbis => {
+                let file = std::fs::File::open(path.as_str())
+                    .map_err(|e| RmpdError::Library(format!("Failed to open file: {e}")))?;
+                let mut reader = BufReader::new(file);
+                let ogg = VorbisFile::read_from(&mut reader, ParseOptions::default())
+                    .map_err(|e| RmpdError::Library(format!("Failed to read OGG: {e}")))?;
+                Ok(collect_vorbis_pairs(ogg.vorbis_comments()))
+            }
+            lofty::file::FileType::Opus => {
+                let file = std::fs::File::open(path.as_str())
+                    .map_err(|e| RmpdError::Library(format!("Failed to open file: {e}")))?;
+                let mut reader = BufReader::new(file);
+                let opus = OpusFile::read_from(&mut reader, ParseOptions::default())
+                    .map_err(|e| RmpdError::Library(format!("Failed to read Opus: {e}")))?;
+                Ok(collect_vorbis_pairs(opus.vorbis_comments()))
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     pub fn extract_from_file(path: &Utf8PathBuf) -> Result<Song> {
         let metadata = fs::metadata(path.as_str())
             .map_err(|e| RmpdError::Library(format!("Failed to read file metadata: {e}")))?;
@@ -112,52 +148,8 @@ impl MetadataExtractor {
             // using lofty's format-specific API. This preserves the original raw key
             // names and avoids lofty normalizing e.g. "ALBUM ARTIST" (space variant)
             // to the same ItemKey as the canonical "ALBUMARTIST".
-            let raw_vc_pairs: Vec<(String, String)> = match tagged_file.file_type() {
-                lofty::file::FileType::Flac => {
-                    let file = std::fs::File::open(path.as_str()).ok();
-                    let mut pairs = Vec::new();
-                    if let Some(f) = file {
-                        let mut reader = BufReader::new(f);
-                        if let Ok(flac) = FlacFile::read_from(&mut reader, ParseOptions::default())
-                            && let Some(vc) = flac.vorbis_comments()
-                        {
-                            for (k, v) in vc.items() {
-                                pairs.push((k.to_string(), v.to_string()));
-                            }
-                        }
-                    }
-                    pairs
-                }
-                lofty::file::FileType::Vorbis => {
-                    let file = std::fs::File::open(path.as_str()).ok();
-                    let mut pairs: Vec<(String, String)> = Vec::new();
-                    if let Some(f) = file {
-                        let mut reader = BufReader::new(f);
-                        if let Ok(ogg) = VorbisFile::read_from(&mut reader, ParseOptions::default())
-                        {
-                            for (k, v) in ogg.vorbis_comments().items() {
-                                pairs.push((k.to_string(), v.to_string()));
-                            }
-                        }
-                    }
-                    pairs
-                }
-                lofty::file::FileType::Opus => {
-                    let file = std::fs::File::open(path.as_str()).ok();
-                    let mut pairs: Vec<(String, String)> = Vec::new();
-                    if let Some(f) = file {
-                        let mut reader = BufReader::new(f);
-                        if let Ok(opus) = OpusFile::read_from(&mut reader, ParseOptions::default())
-                        {
-                            for (k, v) in opus.vorbis_comments().items() {
-                                pairs.push((k.to_string(), v.to_string()));
-                            }
-                        }
-                    }
-                    pairs
-                }
-                _ => Vec::new(),
-            };
+            let raw_vc_pairs =
+                MetadataExtractor::read_vorbis_pairs_for_file_type(path, tagged_file.file_type())?;
             // Apply MPD-canonical key mapping to raw VorbisComment pairs
             for (raw_key, val) in raw_vc_pairs {
                 if val.is_empty() {
@@ -360,21 +352,27 @@ impl MetadataExtractor {
     }
     /// Read raw key-value pairs directly from the audio file.
     ///
-    /// Unlike `extract_from_file`, this returns the raw format-specific tag fields
-    /// as they appear in the file, not normalized to rmpd's internal tag names.
+    /// Unlike `extract_from_file`, this returns comment/frame pairs intended for
+    /// MPD-style `readcomments` output.
+    ///
+    /// Vorbis comments and ID3 user-text frames are returned with their source key
+    /// names. MP4 fourcc atoms are mapped to readable identifiers (e.g. `title`,
+    /// `artist`) so keys satisfy MPD field-name constraints.
     /// Used by the `readcomments` MPD command.
     pub fn read_raw_comments(path: &Utf8PathBuf) -> Result<Vec<(String, String)>> {
-        let ext = path
-            .extension()
-            .map(|e| e.to_lowercase())
-            .unwrap_or_default();
+        let tagged_file = Probe::open(path.as_str())
+            .map_err(|e| RmpdError::Library(format!("Failed to open file: {e}")))?
+            .guess_file_type()
+            .map_err(|e| RmpdError::Library(format!("Failed to detect file type: {e}")))?
+            .read()
+            .map_err(|e| RmpdError::Library(format!("Failed to read file: {e}")))?;
 
-        match ext.as_str() {
-            "flac" => MetadataExtractor::read_vorbis_comments_from_flac(path),
-            "ogg" => MetadataExtractor::read_vorbis_comments_from_ogg(path),
-            "opus" => MetadataExtractor::read_vorbis_comments_from_opus(path),
-            "mp3" => MetadataExtractor::read_comments_from_id3v2(path),
-            "m4a" | "aac" => MetadataExtractor::read_comments_from_mp4(path),
+        match tagged_file.file_type() {
+            lofty::file::FileType::Flac => MetadataExtractor::read_vorbis_comments_from_flac(path),
+            lofty::file::FileType::Vorbis => MetadataExtractor::read_vorbis_comments_from_ogg(path),
+            lofty::file::FileType::Opus => MetadataExtractor::read_vorbis_comments_from_opus(path),
+            lofty::file::FileType::Mpeg => MetadataExtractor::read_comments_from_id3v2(path),
+            lofty::file::FileType::Mp4 => MetadataExtractor::read_comments_from_mp4(path),
             _ => MetadataExtractor::read_comments_generic(path),
         }
     }
@@ -513,5 +511,25 @@ impl MetadataExtractor {
             }
         }
         Ok(pairs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetadataExtractor;
+    use camino::Utf8PathBuf;
+    use lofty::file::FileType;
+    use rmpd_core::error::RmpdError;
+
+    #[test]
+    fn read_vorbis_pairs_propagates_open_errors() {
+        let missing = Utf8PathBuf::from("/definitely/missing/rmpd-metadata-nope.flac");
+        let err = MetadataExtractor::read_vorbis_pairs_for_file_type(&missing, FileType::Flac)
+            .expect_err("missing file should fail");
+
+        match err {
+            RmpdError::Library(msg) => assert!(msg.contains("Failed to open file"), "{msg}"),
+            other => panic!("unexpected error type: {other:?}"),
+        }
     }
 }

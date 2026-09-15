@@ -52,11 +52,9 @@ FILE "album.flac" WAVE
 "#;
 
     let tracks = parse_cue(cue);
-    assert_eq!(tracks.len(), 1);
-    assert_eq!(tracks[0].number, 0);
-    assert_eq!(tracks[0].start, 0.0);
-    assert_eq!(tracks[0].end, None);
-    assert_eq!(tracks[0].title.as_deref(), Some("Broken"));
+    // Malformed track numbers are rejected; invalid INDEX values then have no
+    // track to attach to.
+    assert!(tracks.is_empty());
 }
 
 #[test]

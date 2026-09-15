@@ -15,11 +15,47 @@ fn infer_mime(data: &[u8]) -> &'static str {
         "image/png"
     } else if data.starts_with(b"GIF8") {
         "image/gif"
-    } else if data.len() > 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         "image/webp"
     } else {
         "application/octet-stream"
     }
+}
+
+fn preferred_picture_index(types: &[PictureType]) -> Option<usize> {
+    types
+        .iter()
+        .position(|t| matches!(t, PictureType::CoverFront | PictureType::Other))
+        .or_else(|| (!types.is_empty()).then_some(0))
+}
+
+fn should_extract_from_file(file_path: &str) -> Result<bool> {
+    if file_path.is_empty() {
+        // Source-backed artwork lookups use an empty local path and rely on cache only.
+        return Ok(false);
+    }
+    if !Path::new(file_path).is_absolute() {
+        return Err(RmpdError::Library(format!(
+            "Artwork file path must be absolute: {file_path}"
+        )));
+    }
+    Ok(true)
+}
+
+fn select_picture_from_tag(tag: &lofty::tag::Tag) -> Option<&lofty::picture::Picture> {
+    let pictures = tag.pictures();
+    let types: Vec<PictureType> = pictures.iter().map(|p| p.pic_type()).collect();
+    preferred_picture_index(&types).and_then(|idx| pictures.get(idx))
+}
+
+fn select_picture(tagged_file: &lofty::file::TaggedFile) -> Option<&lofty::picture::Picture> {
+    if let Some(primary_tag) = tagged_file.primary_tag()
+        && let Some(pic) = select_picture_from_tag(primary_tag)
+    {
+        return Some(pic);
+    }
+
+    tagged_file.tags().iter().find_map(select_picture_from_tag)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -52,21 +88,17 @@ impl AlbumArtExtractor {
             return Ok(Some((data, mime)));
         }
 
+        if !should_extract_from_file(file_path)? {
+            return Ok(None);
+        }
+
         // Not in cache, extract from file using absolute path
         let abs_path = Path::new(file_path);
         let tagged_file = lofty::read_from_path(abs_path)
             .map_err(|e| RmpdError::Library(format!("Failed to read file: {e}")))?;
 
-        // Try to find front cover
-        let picture = if let Some(primary_tag) = tagged_file.primary_tag() {
-            primary_tag
-                .pictures()
-                .iter()
-                .find(|p| matches!(p.pic_type(), PictureType::CoverFront | PictureType::Other))
-                .or_else(|| primary_tag.pictures().first())
-        } else {
-            None
-        };
+        // Prefer primary-tag cover art, then scan all tags for fallback.
+        let picture = select_picture(&tagged_file);
 
         if let Some(pic) = picture {
             let data = pic.data();
@@ -120,9 +152,8 @@ impl AlbumArtExtractor {
     }
 
     /// Whether artwork is already cached for `cache_key`.
-    #[must_use]
-    pub fn is_cached(&self, cache_key: &str) -> bool {
-        self.db.has_artwork(cache_key, "front").unwrap_or(false)
+    pub fn is_cached(&self, cache_key: &str) -> Result<bool> {
+        self.db.has_artwork(cache_key, "front")
     }
 
     /// Get album art from cache or extract if not cached
@@ -199,4 +230,53 @@ pub(crate) fn picture_type_to_string(pic_type: PictureType) -> String {
         _ => "other",
     }
     .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_mime_detects_webp_with_12_byte_header() {
+        let data = b"RIFFxxxxWEBP";
+        assert_eq!(infer_mime(data), "image/webp");
+    }
+
+    #[test]
+    fn infer_mime_defaults_to_octet_stream() {
+        assert_eq!(infer_mime(b"not-an-image"), "application/octet-stream");
+    }
+
+    #[test]
+    fn preferred_picture_index_prioritizes_front_then_other_then_first() {
+        let types = vec![PictureType::Media, PictureType::CoverFront, PictureType::Icon];
+        assert_eq!(preferred_picture_index(&types), Some(1));
+
+        let types = vec![PictureType::Media, PictureType::Other, PictureType::Icon];
+        assert_eq!(preferred_picture_index(&types), Some(1));
+
+        let types = vec![PictureType::Media, PictureType::Icon];
+        assert_eq!(preferred_picture_index(&types), Some(0));
+
+        let types: Vec<PictureType> = Vec::new();
+        assert_eq!(preferred_picture_index(&types), None);
+    }
+
+    #[test]
+    fn should_extract_from_file_allows_empty_source_path() {
+        assert!(matches!(should_extract_from_file(""), Ok(false)));
+    }
+
+    #[test]
+    fn should_extract_from_file_rejects_relative_path() {
+        let err = should_extract_from_file("relative/path.flac").expect_err("relative path");
+        assert!(err
+            .to_string()
+            .contains("Artwork file path must be absolute"));
+    }
+
+    #[test]
+    fn should_extract_from_file_accepts_absolute_path() {
+        assert!(matches!(should_extract_from_file("/tmp/song.flac"), Ok(true)));
+    }
 }

@@ -859,14 +859,14 @@ impl Database {
     }
 
     /// List unique values for any tag, with MPD-style fallback.
-    /// Sorted with ICU root-locale collation to match MPD's IcuCollate().
+    /// Sorted with lexicographic byte order to match MPD's std::map behavior.
     pub fn list_tag_values(&self, tag: &str) -> Result<Vec<String>> {
         let tag_lower = tag.to_lowercase();
         let chain = tag_fallback_chain(&tag_lower);
 
         let mut values: Vec<String> = if chain.len() == 1 {
             // Simple case — single tag
-            let query = "SELECT DISTINCT value FROM song_tags WHERE tag = ?1";
+            let query = "SELECT DISTINCT value FROM song_tags WHERE tag = ?1 AND value != ''";
             let mut stmt = self.conn.prepare(query)?;
             stmt.query_map(params![chain[0]], |row| row.get(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?
@@ -880,7 +880,7 @@ impl Database {
             // Get values from primary tag
             let mut stmt = self
                 .conn
-                .prepare("SELECT DISTINCT value FROM song_tags WHERE tag = ?1")?;
+                .prepare("SELECT DISTINCT value FROM song_tags WHERE tag = ?1 AND value != ''")?;
             let primary_vals: Vec<String> = stmt
                 .query_map(params![primary], |row| row.get(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -888,14 +888,16 @@ impl Database {
 
             // For each fallback level, get values for songs that don't have the primary tag
             for fallback in &chain[1..] {
-                let sql = format!(
+                let sql =
                     "SELECT DISTINCT st.value FROM song_tags st
                      WHERE st.tag = ?1
-                       AND st.song_id NOT IN (SELECT song_id FROM song_tags WHERE tag = '{primary}')"
-                );
+                       AND st.value != ''
+                       AND st.song_id NOT IN (
+                           SELECT song_id FROM song_tags WHERE tag = ?2 AND value != ''
+                       )";
                 let mut stmt = self.conn.prepare(&sql)?;
                 let vals: Vec<String> = stmt
-                    .query_map(params![fallback], |row| row.get(0))?
+                    .query_map(params![fallback, primary], |row| row.get(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 all_values.extend(vals);
             }
@@ -921,10 +923,7 @@ impl Database {
                  (SELECT DISTINCT song_id FROM song_tags WHERE tag IN ({placeholders}) AND value != ''))"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            stmt.query_row(rusqlite::params_from_iter(tag_list.iter()), |row| {
-                row.get(0)
-            })
-            .unwrap_or(false)
+            stmt.query_row(rusqlite::params_from_iter(tag_list.iter()), |row| row.get(0))?
         };
         if has_missing {
             values.push(String::new());
@@ -1112,7 +1111,7 @@ impl Database {
         if let Some(id) = self
             .conn
             .query_row(
-                "SELECT id FROM directories WHERE parent_id IS NULL LIMIT 1",
+                "SELECT id FROM directories WHERE path = '' LIMIT 1",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1299,8 +1298,10 @@ impl Database {
             return Err(RmpdError::Library("No such directory".to_string()));
         }
 
-        // Get subdirectories
+        // Get subdirectories and songs for the resolved directory id.
+        // Root without a canonical row (`path = ''`) is treated as empty.
         let mut directories = Vec::new();
+        let mut songs: Vec<Song> = Vec::new();
         if let Some(id) = dir_id {
             let mut stmt = self.conn.prepare(
                 "SELECT path, mtime FROM directories WHERE parent_id = ?1 ORDER BY path",
@@ -1311,25 +1312,15 @@ impl Database {
             for row in rows {
                 directories.push(row?);
             }
-        } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT path, mtime FROM directories WHERE parent_id IS NULL ORDER BY path",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                directories.push(row?);
-            }
+            // Get songs in this directory (no ORDER BY; sort in Rust after loading tags)
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {SONG_COLUMNS} FROM songs WHERE directory_id = ?1"
+            ))?;
+            songs = stmt
+                .query_map(params![id], song_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
         }
 
-        // Get songs in this directory (no ORDER BY; sort in Rust after loading tags)
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {SONG_COLUMNS} FROM songs WHERE directory_id = ?1"
-        ))?;
-        let mut songs: Vec<Song> = stmt
-            .query_map(params![dir_id.unwrap_or(0)], song_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
         self.load_tags_for_songs(&mut songs)?;
 
         // Sort to match MPD's song_cmp: Album (ICU) -> Disc -> Track -> Filename (ICU)
@@ -1342,12 +1333,29 @@ impl Database {
 
     /// List all songs under a directory recursively
     pub fn list_directory_recursive(&self, path: &str) -> Result<Vec<Song>> {
-        let sql =
-            format!("SELECT {SONG_COLUMNS} FROM songs WHERE path LIKE ?1 || '%' ORDER BY path");
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut songs: Vec<Song> = stmt
-            .query_map(params![path], song_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let normalized = if path == "/" {
+            ""
+        } else {
+            path.trim_end_matches('/')
+        };
+
+        let mut songs: Vec<Song> = if normalized.is_empty() {
+            let sql = format!("SELECT {SONG_COLUMNS} FROM songs ORDER BY path");
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map([], song_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            let sql = format!(
+                "SELECT {SONG_COLUMNS} FROM songs
+                 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'
+                 ORDER BY path"
+            );
+            let escaped = normalized.replace('%', "\\%").replace('_', "\\_");
+            let like_prefix = format!("{escaped}/%");
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(params![normalized, like_prefix], song_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
         self.load_tags_for_songs(&mut songs)?;
         Ok(songs)
     }
@@ -1358,7 +1366,7 @@ impl Database {
             Ok(self
                 .conn
                 .query_row(
-                    "SELECT id FROM directories WHERE parent_id IS NULL LIMIT 1",
+                    "SELECT id FROM directories WHERE path = '' LIMIT 1",
                     [],
                     |row| row.get(0),
                 )
@@ -1381,7 +1389,7 @@ impl Database {
             Ok(self
                 .conn
                 .query_row(
-                    "SELECT mtime FROM directories WHERE parent_id IS NULL LIMIT 1",
+                    "SELECT mtime FROM directories WHERE path = '' LIMIT 1",
                     [],
                     |row| row.get(0),
                 )

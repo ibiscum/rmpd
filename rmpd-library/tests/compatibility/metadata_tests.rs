@@ -4,8 +4,11 @@
 /// and validate that rmpd extracts metadata correctly from various formats.
 use std::time::Duration;
 
+use camino::Utf8PathBuf;
+
 use crate::common::rmpd_harness::RmpdTestHarness;
 use crate::fixtures::pregenerated;
+use rmpd_library::metadata::MetadataExtractor;
 
 #[test]
 fn test_flac_metadata_extraction() {
@@ -230,4 +233,36 @@ fn test_multiple_formats_consistency() {
         assert!(song.channels.is_some());
         assert!(song.duration.is_some());
     }
+}
+
+#[test]
+fn test_read_raw_comments_mp4_uses_mpd_safe_keys() {
+    let path = pregenerated::basic_m4a();
+    let utf8_path = Utf8PathBuf::from_path_buf(path).expect("fixture path must be utf-8");
+    let pairs = MetadataExtractor::read_raw_comments(&utf8_path).expect("read comments");
+
+    assert!(
+        pairs.iter().any(|(k, _)| k == "title"),
+        "expected mapped MP4 key 'title'"
+    );
+    assert!(
+        pairs.iter().all(|(k, _)| k.is_ascii()),
+        "expected MPD-safe ASCII key names"
+    );
+}
+
+#[test]
+fn test_read_raw_comments_uses_probed_file_type_not_extension() {
+    let src = pregenerated::basic_m4a();
+    let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+    let renamed = temp_dir.path().join("fixture.bin");
+    std::fs::copy(&src, &renamed).expect("copy fixture");
+
+    let utf8_path = Utf8PathBuf::from_path_buf(renamed).expect("temp path must be utf-8");
+    let pairs = MetadataExtractor::read_raw_comments(&utf8_path).expect("read comments");
+
+    assert!(
+        pairs.iter().any(|(k, _)| k == "title"),
+        "expected MP4 metadata to be parsed even with non-audio extension"
+    );
 }

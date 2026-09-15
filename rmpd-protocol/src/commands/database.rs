@@ -1,6 +1,6 @@
 //! Database and library browsing command handlers
 
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::helpers;
 use crate::response::{Response, ResponseBuilder};
@@ -447,7 +447,14 @@ pub async fn handle_albumart_command(state: &AppState, uri: &str, offset: usize)
     // from the source server (once) and cached locally — never read from a file.
     if state.sources.owns_path(uri) {
         let extractor = rmpd_library::AlbumArtExtractor::new(db);
-        if !extractor.is_cached(uri)
+        let cached = match extractor.is_cached(uri) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("albumart cache lookup failed for {}: {}", uri, e);
+                false
+            }
+        };
+        if !cached
             && let Ok(Some(bytes)) = state.sources.cover_art(uri).await
         {
             let _ = extractor.cache_external(uri, &bytes);
@@ -518,7 +525,14 @@ pub async fn handle_readpicture_command(state: &AppState, uri: &str, offset: usi
     // art" is an empty OK (matching readpicture semantics), not an error.
     if state.sources.owns_path(uri) {
         let extractor = rmpd_library::AlbumArtExtractor::new(db);
-        if !extractor.is_cached(uri)
+        let cached = match extractor.is_cached(uri) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("readpicture cache lookup failed for {}: {}", uri, e);
+                false
+            }
+        };
+        if !cached
             && let Ok(Some(bytes)) = state.sources.cover_art(uri).await
         {
             let _ = extractor.cache_external(uri, &bytes);

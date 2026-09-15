@@ -15,8 +15,6 @@ use rmpd_core::time::system_time_to_unix_secs;
 struct FileInfo {
     absolute_path: Utf8PathBuf,
     relative_path: Utf8PathBuf,
-    #[allow(dead_code)] // Used by directory mtime comparison during incremental scans
-    mtime: i64,
     existing_song: Option<rmpd_core::song::Song>,
 }
 
@@ -60,36 +58,42 @@ impl Scanner {
         info!("starting music library scan: {}", root_path.display());
         self.event_bus.emit(Event::DatabaseUpdateStarted);
 
-        let mut stats = ScanStats::default();
+        let result = (|| {
+            let mut stats = ScanStats::default();
 
-        // Build a scanner variant that knows the music directory so that make_relative_path
-        // can strip the root prefix from absolute paths during the scan.
-        let music_dir = Utf8PathBuf::try_from(root_path.to_path_buf())
-            .map_err(|_| RmpdError::Library("Music directory path is not valid UTF-8".into()))?;
-        let scanner_with_dir = self.with_music_dir(music_dir);
+            // Build a scanner variant that knows the music directory so that make_relative_path
+            // can strip the root prefix from absolute paths during the scan.
+            let music_dir = Utf8PathBuf::try_from(root_path.to_path_buf()).map_err(|_| {
+                RmpdError::Library("Music directory path is not valid UTF-8".into())
+            })?;
+            let scanner_with_dir = self.with_music_dir(music_dir);
 
-        scanner_with_dir.scan_recursive(db, root_path, &mut stats)?;
+            scanner_with_dir.scan_recursive(db, root_path, &mut stats)?;
 
-        info!(
-            "scan complete: {} files scanned, {} added, {} updated, {} errors",
-            stats.scanned, stats.added, stats.updated, stats.errors
-        );
+            info!(
+                "scan complete: {} files scanned, {} added, {} updated, {} errors",
+                stats.scanned, stats.added, stats.updated, stats.errors
+            );
+
+            Ok(stats)
+        })();
 
         self.event_bus.emit(Event::DatabaseUpdateFinished);
-
-        Ok(stats)
+        result
     }
 
     /// Convert absolute path to relative path (relative to music_directory)
     fn make_relative_path(&self, abs_path: &Utf8PathBuf) -> Result<Utf8PathBuf> {
         if let Some(music_dir) = &self.music_directory {
-            // Strip music directory prefix
-            if let Some(relative) = abs_path.as_str().strip_prefix(music_dir.as_str()) {
-                let relative = relative.trim_start_matches('/');
-                return Ok(Utf8PathBuf::from(relative));
-            }
+            let relative = abs_path.strip_prefix(music_dir.as_path()).map_err(|_| {
+                RmpdError::Library(format!(
+                    "Path '{}' is outside music directory '{}'",
+                    abs_path, music_dir
+                ))
+            })?;
+            return Ok(relative.to_path_buf());
         }
-        // Fallback: return as-is if we can't make it relative
+        // No music dir configured (e.g. tests constructing Scanner directly).
         Ok(abs_path.clone())
     }
 
@@ -310,7 +314,6 @@ impl Scanner {
                 files.push(FileInfo {
                     absolute_path: utf8_path,
                     relative_path,
-                    mtime,
                     existing_song,
                 });
             }
@@ -326,4 +329,67 @@ pub struct ScanStats {
     pub added: u32,
     pub updated: u32,
     pub errors: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scanner;
+    use camino::Utf8PathBuf;
+    use rmpd_core::event::{Event, EventBus};
+
+    #[test]
+    fn make_relative_path_rejects_paths_outside_music_directory() {
+        let scanner = Scanner::new(EventBus::new(), false)
+            .with_music_dir(Utf8PathBuf::from("/music/root"));
+
+        let err = scanner
+            .make_relative_path(&Utf8PathBuf::from("/other/location/song.flac"))
+            .expect_err("outside path must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("outside music directory"), "{msg}");
+    }
+
+    #[test]
+    fn make_relative_path_strips_root_prefix_exactly() {
+        let scanner = Scanner::new(EventBus::new(), false)
+            .with_music_dir(Utf8PathBuf::from("/music/root"));
+
+        let rel = scanner
+            .make_relative_path(&Utf8PathBuf::from("/music/root/album/song.flac"))
+            .expect("relative path");
+        assert_eq!(rel.as_str(), "album/song.flac");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_directory_emits_finished_event_on_early_error() {
+        use crate::database::Database;
+        use std::os::unix::ffi::OsStringExt;
+        use tempfile::TempDir;
+
+        let event_bus = EventBus::new();
+        let mut rx = event_bus.subscribe();
+        let scanner = Scanner::new(event_bus.clone(), false);
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("scan-events.db");
+        let db = Database::open(db_path.to_str().expect("utf-8 db path")).expect("open db");
+
+        let non_utf8_root = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0x66, 0x80]));
+        let result = scanner.scan_directory(&db, &non_utf8_root);
+        assert!(result.is_err(), "non-UTF8 root should fail");
+
+        let mut saw_started = false;
+        let mut saw_finished = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                Event::DatabaseUpdateStarted => saw_started = true,
+                Event::DatabaseUpdateFinished => saw_finished = true,
+                _ => {}
+            }
+        }
+
+        assert!(saw_started, "expected DatabaseUpdateStarted event");
+        assert!(saw_finished, "expected DatabaseUpdateFinished event");
+    }
 }

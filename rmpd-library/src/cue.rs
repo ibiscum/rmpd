@@ -95,8 +95,8 @@ pub fn parse_cue(content: &str) -> Vec<CueTrack> {
     let mut album: Option<String> = None;
     let mut album_performer: Option<String> = None;
     let mut current_file: Option<String> = None;
+    let mut current_track_idx: Option<usize> = None;
     let mut partials: Vec<PartialTrack> = Vec::new();
-    let mut seen_track = false;
 
     for line in content.lines() {
         let Some((kw, rest)) = split_keyword(line) else {
@@ -105,23 +105,36 @@ pub fn parse_cue(content: &str) -> Vec<CueTrack> {
         match kw.as_str() {
             "FILE" => {
                 current_file = Some(unquote(rest));
+                current_track_idx = None;
             }
             "TRACK" => {
-                seen_track = true;
-                let number = rest
+                let number = match rest
                     .split_whitespace()
                     .next()
                     .and_then(|n| n.parse::<u32>().ok())
-                    .unwrap_or(0);
+                {
+                    Some(n) if n > 0 => n,
+                    _ => {
+                        current_track_idx = None;
+                        continue;
+                    }
+                };
+
+                let Some(file) = current_file.clone() else {
+                    current_track_idx = None;
+                    continue;
+                };
+
                 partials.push(PartialTrack {
-                    file: current_file.clone().unwrap_or_default(),
+                    file,
                     number,
                     ..Default::default()
                 });
+                current_track_idx = Some(partials.len() - 1);
             }
             "TITLE" => {
                 let value = unquote(rest);
-                if let Some(track) = partials.last_mut().filter(|_| seen_track) {
+                if let Some(track) = current_track_idx.and_then(|idx| partials.get_mut(idx)) {
                     track.title = Some(value);
                 } else {
                     album = Some(value);
@@ -129,7 +142,7 @@ pub fn parse_cue(content: &str) -> Vec<CueTrack> {
             }
             "PERFORMER" => {
                 let value = unquote(rest);
-                if let Some(track) = partials.last_mut().filter(|_| seen_track) {
+                if let Some(track) = current_track_idx.and_then(|idx| partials.get_mut(idx)) {
                     track.performer = Some(value);
                 } else {
                     album_performer = Some(value);
@@ -282,4 +295,56 @@ FILE "x.flac" WAVE
         assert!(parse_cue("").is_empty());
         assert!(parse_cue("not a cue sheet\njust text").is_empty());
     }
+
+        #[test]
+        fn title_and_performer_between_files_do_not_mutate_previous_track() {
+                let cue = r#"
+PERFORMER "Album Artist"
+TITLE "Album"
+FILE "a.flac" WAVE
+    TRACK 01 AUDIO
+        TITLE "A1"
+        PERFORMER "Artist A"
+        INDEX 01 00:00:00
+FILE "b.flac" WAVE
+TITLE "Album Retag"
+PERFORMER "Album Artist 2"
+    TRACK 02 AUDIO
+        TITLE "B1"
+        INDEX 01 00:00:00
+"#;
+
+                let tracks = parse_cue(cue);
+                assert_eq!(tracks.len(), 2);
+
+                assert_eq!(tracks[0].file, "a.flac");
+                assert_eq!(tracks[0].title.as_deref(), Some("A1"));
+                assert_eq!(tracks[0].performer.as_deref(), Some("Artist A"));
+
+                assert_eq!(tracks[1].file, "b.flac");
+                assert_eq!(tracks[1].title.as_deref(), Some("B1"));
+                assert_eq!(tracks[1].album.as_deref(), Some("Album Retag"));
+                assert_eq!(tracks[1].album_performer.as_deref(), Some("Album Artist 2"));
+        }
+
+        #[test]
+        fn skips_track_without_file_and_invalid_track_numbers() {
+                let cue = r#"
+TRACK 01 AUDIO
+    INDEX 01 00:00:00
+FILE "disc.flac" WAVE
+    TRACK XX AUDIO
+        INDEX 01 00:10:00
+    TRACK 00 AUDIO
+        INDEX 01 00:20:00
+    TRACK 01 AUDIO
+        INDEX 01 00:30:00
+"#;
+
+                let tracks = parse_cue(cue);
+                assert_eq!(tracks.len(), 1);
+                assert_eq!(tracks[0].file, "disc.flac");
+                assert_eq!(tracks[0].number, 1);
+                assert!(approx(tracks[0].start, 30.0));
+        }
 }
