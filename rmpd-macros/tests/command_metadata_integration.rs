@@ -11,6 +11,18 @@ enum TestCommand {
     SeekCur(u32),
 }
 
+#[allow(dead_code)]
+#[derive(CommandMetadata)]
+enum GenericCommand<T>
+where
+    T: Copy,
+{
+    #[command(name = "set", permission = 8)]
+    Set(T),
+    #[command(name = "reset")]
+    Reset,
+}
+
 #[test]
 fn derives_name_and_permission_for_all_variant_shapes() {
     let play = TestCommand::Play { position: Some(42) };
@@ -24,4 +36,15 @@ fn derives_name_and_permission_for_all_variant_shapes() {
     let seek = TestCommand::SeekCur(10);
     assert_eq!(seek.command_name(), "seekcur");
     assert_eq!(seek.command_required_permission(), 2);
+}
+
+#[test]
+fn derives_name_and_permission_for_generic_enums() {
+    let set = GenericCommand::Set(7_u8);
+    assert_eq!(set.command_name(), "set");
+    assert_eq!(set.command_required_permission(), 8);
+
+    let reset = GenericCommand::<u8>::Reset;
+    assert_eq!(reset.command_name(), "reset");
+    assert_eq!(reset.command_required_permission(), 0);
 }
