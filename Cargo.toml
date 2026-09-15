@@ -3,12 +3,13 @@ resolver = "2"
 members = [
     "rmpd",
     "rmpd-core",
-    "rmpd-macros",
-    "rmpd-protocol",
-    "rmpd-player",
     "rmpd-library",
+    "rmpd-macros",
+    "rmpd-player",
     "rmpd-plugin",
+    "rmpd-protocol",
     "rmpd-source",
+    "rmpd-stream"
 ]
 
 [workspace.package]
@@ -50,7 +51,6 @@ tantivy = "0.26"
 toml = "1.1"
 parking_lot = "0.12"
 
-
 # Utilities
 clap = { version = "4", features = ["derive"] }
 notify = "8"
@@ -63,11 +63,11 @@ dirs = "6"
 sha2 = "0.11"
 
 # Advanced features
-mdns-sd = "0.20"                  # Network discovery
-mpris-server = { version = "0.10", features = ["tokio"] }  # MPRIS D-Bus media player interface
-chromaprint-sys-next = "1.6"      # Audio fingerprinting
-base64 = "0.22"                   # Base64 encoding
-nix = { version = "0.31", features = ["mount", "process", "fs"] }  # Linux mount syscalls
+mdns-sd = "0.20"                                                  # Network discovery
+mpris-server = { version = "0.10", features = ["tokio"] }         # MPRIS D-Bus media player interface
+chromaprint-sys-next = "1.6"                                      # Audio fingerprinting
+base64 = "^0.23"                                                  # Base64 encoding
+nix = { version = "0.31", features = ["mount", "process", "fs"] } # Linux mount syscalls
 
 # Shared workspace crates
 rmpd-core = { path = "rmpd-core" }
