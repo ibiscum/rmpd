@@ -245,7 +245,7 @@ impl ResponseBuilder {
                 continue;
             }
             let canonical = rmpd_core::song::canonical_tag_name(tag);
-            self.field(canonical, value);
+            self.field(canonical.as_ref(), value);
         }
         // Duration
         if let Some(duration) = song.duration {

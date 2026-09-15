@@ -7,7 +7,7 @@
 ///            | (EXPRESSION) OR (EXPRESSION)
 ///            | ! EXPRESSION
 ///            | TAG OPERATOR VALUE
-/// OPERATOR := == | != | =~ | !~ | < | > | <= | >=
+/// OPERATOR := == | != | =~ | !~ | < | > | <= | >= | contains | starts_with
 use crate::error::{Result, RmpdError};
 use crate::tag::tag_fallback_chain;
 
@@ -44,16 +44,17 @@ pub enum CompareOp {
 impl FilterExpression {
     /// Parse a filter expression string
     pub fn parse(input: &str) -> Result<Self> {
-        let input = input.trim();
-
-        // Remove outer parentheses if present
-        let input = if input.starts_with('(') && input.ends_with(')') {
-            &input[1..input.len() - 1]
+        let mut parser = Parser::new(input.trim());
+        let expr = parser.parse_expression()?;
+        parser.skip_whitespace();
+        if parser.is_eof() {
+            Ok(expr)
         } else {
-            input
-        };
-
-        Parser::new(input).parse_expression()
+            Err(RmpdError::ParseError(format!(
+                "Unexpected token at position {}",
+                parser.pos
+            )))
+        }
     }
 
     /// Convert filter expression to SQL WHERE clause using EXISTS subqueries on song_tags.
@@ -147,9 +148,13 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_char(&self) -> Result<char> {
-        self.input.chars().nth(self.pos).ok_or_else(|| {
+        self.input[self.pos..].chars().next().ok_or_else(|| {
             RmpdError::ParseError(format!("Unexpected end of input at position {}", self.pos))
         })
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.input.len()
     }
 
     fn parse_expression(&mut self) -> Result<FilterExpression> {
@@ -226,7 +231,7 @@ impl<'a> Parser<'a> {
         while self.pos < self.input.len() {
             let ch = self.peek_char()?;
             if ch.is_alphanumeric() || ch == '_' || ch == '-' {
-                self.pos += 1;
+                self.pos += ch.len_utf8();
             } else {
                 break;
             }
@@ -268,19 +273,19 @@ impl<'a> Parser<'a> {
         if quote_char != '\'' && quote_char != '"' {
             return Err(RmpdError::ParseError("Quoted string expected".to_owned()));
         }
-        self.pos += 1;
+        self.pos += quote_char.len_utf8();
 
         let mut result = String::new();
         while self.pos < self.input.len() {
             let ch = self.peek_char()?;
             if ch == quote_char {
-                self.pos += 1;
+                self.pos += ch.len_utf8();
                 return Ok(result);
             } else if ch == '\\' && self.pos + 1 < self.input.len() {
-                self.pos += 1;
+                self.pos += ch.len_utf8();
                 let escaped = self.peek_char()?;
                 result.push(escaped);
-                self.pos += 1;
+                self.pos += escaped.len_utf8();
             } else {
                 result.push(ch);
                 self.pos += ch.len_utf8();
@@ -293,7 +298,7 @@ impl<'a> Parser<'a> {
         while self.pos < self.input.len() {
             if let Ok(ch) = self.peek_char() {
                 if ch.is_whitespace() {
-                    self.pos += 1;
+                    self.pos += ch.len_utf8();
                 } else {
                     break;
                 }
@@ -440,5 +445,21 @@ mod tests {
         assert!(sql.starts_with("EXISTS"), "expected EXISTS, got: {sql}");
         assert!(sql.contains("st.value != ''"), "got: {sql}");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_disjunction_without_outer_wrapper_parens() {
+        let expr =
+            FilterExpression::parse("(artist == 'Radiohead') OR (artist == 'Muse')").unwrap();
+        let (sql, params) = expr.to_sql();
+        assert!(sql.contains("OR"), "SQL should contain OR: {sql}");
+        assert_eq!(params, vec!["Radiohead", "Muse"]);
+    }
+
+    #[test]
+    fn test_unicode_quoted_value_parses() {
+        let expr = FilterExpression::parse("(artist == 'Bjo\u{308}rk')").unwrap();
+        let (_, params) = expr.to_sql();
+        assert_eq!(params, vec!["Bjo\u{308}rk"]);
     }
 }

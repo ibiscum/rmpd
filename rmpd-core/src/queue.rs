@@ -258,7 +258,7 @@ impl Queue {
 
     pub fn move_by_id(&mut self, id: u32, to: u32) -> bool {
         if let Some(from_idx) = self.items.iter().position(|i| i.id == id) {
-            if to as usize > self.items.len() {
+            if to as usize >= self.items.len() {
                 return false;
             }
             let item = self.items.remove(from_idx);
@@ -320,19 +320,25 @@ impl Queue {
         id
     }
 
-    /// Set priority for songs in the given position range
-    pub fn set_priority_range(&mut self, priority: u8, ranges: &[(u32, u32)]) {
+    /// Set priority for songs in the given position range.
+    /// Returns true if at least one item's priority changed.
+    pub fn set_priority_range(&mut self, priority: u8, ranges: &[(u32, u32)]) -> bool {
+        let mut any_changed = false;
         for &(start, end) in ranges {
             let start_idx = start as usize;
             let end_idx = end.min(self.items.len() as u32) as usize;
 
             for idx in start_idx..end_idx {
-                if idx < self.items.len() {
+                if idx < self.items.len() && self.items[idx].priority != priority {
                     self.items[idx].priority = priority;
+                    any_changed = true;
                 }
             }
         }
-        self.version += 1;
+        if any_changed {
+            self.version += 1;
+        }
+        any_changed
     }
 
     /// Set priority for songs with the given IDs
@@ -350,14 +356,16 @@ impl Queue {
         any_changed
     }
 
-    /// Set playback range for a song with the given ID
+    /// Set playback range for a song with the given ID.
     ///
     /// The range is specified in seconds as (start, end).
-    /// Returns true if the item was found and updated.
+    /// Returns true if the item was found.
     pub fn set_range_by_id(&mut self, id: u32, range: Option<(f64, f64)>) -> bool {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-            item.range = range;
-            self.version += 1;
+            if item.range != range {
+                item.range = range;
+                self.version += 1;
+            }
             true
         } else {
             false
@@ -370,8 +378,11 @@ impl Queue {
     pub fn add_tag_by_id(&mut self, id: u32, tag: String, value: String) -> bool {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
             let tags = item.tags.get_or_insert_with(HashMap::new);
+            let changed = tags.get(&tag).map(String::as_str) != Some(value.as_str());
             tags.insert(tag, value);
-            self.version += 1;
+            if changed {
+                self.version += 1;
+            }
             true
         } else {
             false
@@ -384,10 +395,11 @@ impl Queue {
     /// Returns true if the item was found.
     pub fn clear_tags_by_id(&mut self, id: u32, tag: Option<&str>) -> bool {
         if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            let mut changed = false;
             if let Some(tag_name) = tag {
                 // Clear specific tag
                 if let Some(tags) = &mut item.tags {
-                    tags.remove(tag_name);
+                    changed = tags.remove(tag_name).is_some();
                     // If no tags left, remove the HashMap
                     if tags.is_empty() {
                         item.tags = None;
@@ -395,9 +407,12 @@ impl Queue {
                 }
             } else {
                 // Clear all tags
+                changed = item.tags.is_some();
                 item.tags = None;
             }
-            self.version += 1;
+            if changed {
+                self.version += 1;
+            }
             true
         } else {
             false

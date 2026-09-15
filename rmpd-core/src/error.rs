@@ -38,6 +38,28 @@ pub enum RmpdError {
 
 pub type Result<T> = std::result::Result<T, RmpdError>;
 
+impl RmpdError {
+    /// Return the error detail without category prefixes from `Display`.
+    #[must_use]
+    pub fn detail_message(&self) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
+
+        match self {
+            Self::Config(msg)
+            | Self::Database(msg)
+            | Self::Player(msg)
+            | Self::Protocol(msg)
+            | Self::ParseError(msg)
+            | Self::Library(msg)
+            | Self::Storage(msg)
+            | Self::NotFound(msg)
+            | Self::InvalidState(msg) => Cow::Borrowed(msg.as_str()),
+            Self::Io(err) => Cow::Owned(err.to_string()),
+            Self::PermissionDenied => Cow::Borrowed("Permission denied"),
+        }
+    }
+}
+
 // Automatic error conversions for common dependency errors
 #[cfg(feature = "database-errors")]
 impl From<rusqlite::Error> for RmpdError {
@@ -56,7 +78,7 @@ impl From<symphonia::core::errors::Error> for RmpdError {
 #[cfg(feature = "player-errors")]
 impl From<cpal::Error> for RmpdError {
     fn from(err: cpal::Error) -> Self {
-        RmpdError::Player(format!("CPAL error: {err}"))
+        RmpdError::Player(err.to_string())
     }
 }
 

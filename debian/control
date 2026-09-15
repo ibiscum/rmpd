@@ -1,8 +1,18 @@
 Source: rmpd
 Section: sound
 Priority: optional
-Maintainer: ibiscum <>
-Build-Depends: debhelper-compat (= 13), cargo, rustc, pkgconf, libasound2-dev, libclang-dev, cmake
+Maintainer: ibiscum <ibiscum@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+    dh-cargo,
+    cargo (>= 1.94.1+dfsg1-1~bpo13+3),
+    rustc (>= 1.94.1+dfsg1-1~bpo13+3),
+    git,
+    ca-certificates,
+    pkgconf,
+    libasound2-dev,
+    libchromaprint-dev,
+    libclang-dev,
+    cmake
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 Homepage: https://github.com/M0Rf30/rmpd

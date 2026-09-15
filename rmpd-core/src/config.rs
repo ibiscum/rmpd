@@ -354,8 +354,10 @@ impl Config {
             .map_err(|e| RmpdError::Config(format!("Failed to parse config: {e}")))?;
 
         config.expand_paths();
-        config.ensure_directories();
         config.validate()?;
+        // Keep invalid configs side-effect free: only create directories after
+        // all validation checks pass.
+        config.ensure_directories();
         Ok(config)
     }
 

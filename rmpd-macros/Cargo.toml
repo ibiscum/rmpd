@@ -13,3 +13,6 @@ proc-macro = true
 [dependencies]
 syn = { version = "2", features = ["full"] }
 quote = "1"
+
+[dev-dependencies]
+trybuild = "1"

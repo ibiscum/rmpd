@@ -1,0 +1,5 @@
+error: number too large to fit in target type
+ --> tests/ui/compile_fail/permission_out_of_range.rs:5:43
+  |
+5 |     #[command(name = "play", permission = 300)]
+  |                                           ^^^

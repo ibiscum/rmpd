@@ -44,7 +44,6 @@ impl MessageBroker {
     }
 
     /// Send a message to a channel. Returns false if nobody is subscribed.
-    /// Send a message to a channel. Returns false if nobody is subscribed.
     pub async fn send_message(&self, channel: String, text: String) -> bool {
         let mut inner = self.inner.write().await;
         // Check if anyone is subscribed

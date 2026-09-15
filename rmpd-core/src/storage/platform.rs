@@ -5,12 +5,60 @@ use std::process::Command;
 /// Parse URI into protocol and address (e.g. "nfs://server/path" -> ("nfs", "server/path"))
 fn parse_uri(uri: &str) -> Result<(String, String)> {
     if let Some(pos) = uri.find("://") {
-        let protocol = uri[..pos].to_lowercase();
-        let address = &uri[pos + 3..];
+        let protocol = uri[..pos].trim().to_lowercase();
+        let address = uri[pos + 3..].trim();
+        if protocol.is_empty() || address.is_empty() {
+            return Err(RmpdError::Storage(format!("Invalid URI format: {uri}")));
+        }
         Ok((protocol, address.to_string()))
     } else {
         Err(RmpdError::Storage(format!("Invalid URI format: {uri}")))
     }
+}
+
+/// Validate mount options before joining with commas for `mount -o`.
+fn validate_mount_options(options: &[String]) -> Result<()> {
+    for opt in options {
+        if opt.trim().is_empty() {
+            return Err(RmpdError::Storage("Invalid mount option: empty option".to_string()));
+        }
+        if opt.contains(',') {
+            return Err(RmpdError::Storage(format!(
+                "Invalid mount option (contains comma): {opt}"
+            )));
+        }
+        if opt.contains('\0') {
+            return Err(RmpdError::Storage(
+                "Invalid mount option: contains NUL byte".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn has_username_option(options: &[String]) -> bool {
+    options.iter().any(|opt| {
+        let trimmed = opt.trim_start();
+        trimmed == "username" || trimmed.starts_with("username=")
+    })
+}
+
+fn is_already_unmounted_message(stderr: &str) -> bool {
+    let msg = stderr.to_lowercase();
+    msg.contains("not mounted") || msg.contains("not currently mounted")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn mount_output_contains_mountpoint(output: &str, mountpoint: &str) -> bool {
+    output.lines().any(|line| {
+        if let Some(on_idx) = line.find(" on ") {
+            let after_on = &line[on_idx + 4..];
+            if let Some(flags_idx) = after_on.find(" (") {
+                return &after_on[..flags_idx] == mountpoint;
+            }
+        }
+        false
+    })
 }
 
 /// Convert a Path to a UTF-8 str, returning a descriptive error on failure
@@ -56,6 +104,8 @@ impl LinuxMountBackend {
         target: &str,
         options: &[String],
     ) -> Result<()> {
+        validate_mount_options(options)?;
+
         let mut cmd = Command::new("mount");
         cmd.arg("-t").arg(fs_type).arg(source).arg(target);
 
@@ -99,7 +149,7 @@ impl MountBackend for LinuxMountBackend {
 
                 // Add guest option if no credentials provided
                 let mut mount_options = options.to_vec();
-                if !options.iter().any(|opt| opt.contains("username")) {
+                if !has_username_option(options) {
                     mount_options.push("guest".to_string());
                 }
 
@@ -136,7 +186,7 @@ impl MountBackend for LinuxMountBackend {
             let stderr = String::from_utf8_lossy(&output.stderr);
 
             // Check if it's because it's not mounted
-            if stderr.contains("not mounted") {
+            if is_already_unmounted_message(&stderr) {
                 return Ok(()); // Already unmounted, treat as success
             }
 
@@ -231,7 +281,7 @@ impl MountBackend for MacOSMountBackend {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("not currently mounted") {
+            if is_already_unmounted_message(&stderr) {
                 return Ok(());
             }
             return Err(RmpdError::Storage(format!("Unmount failed: {stderr}")));
@@ -245,9 +295,7 @@ impl MountBackend for MacOSMountBackend {
         if let Ok(output) = Command::new("mount").output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mountpoint_str = mountpoint.to_string_lossy();
-            stdout
-                .lines()
-                .any(|line| line.contains(&format!("on {} ", mountpoint_str)))
+            mount_output_contains_mountpoint(&stdout, &mountpoint_str)
         } else {
             false
         }
@@ -314,6 +362,49 @@ mod tests {
     fn test_parse_uri_invalid() {
         let result = parse_uri("invalid_uri");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_uri_rejects_empty_parts() {
+        assert!(parse_uri("://server/path").is_err());
+        assert!(parse_uri("nfs://").is_err());
+        assert!(parse_uri("nfs://   ").is_err());
+    }
+
+    #[test]
+    fn test_validate_mount_options_rejects_invalid_inputs() {
+        assert!(validate_mount_options(&["".to_string()]).is_err());
+        assert!(validate_mount_options(&["user,name=foo".to_string()]).is_err());
+        assert!(validate_mount_options(&["user\0name=foo".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_mount_options_accepts_normal_inputs() {
+        assert!(validate_mount_options(&["ro".to_string(), "username=foo".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn test_has_username_option_exact_key_only() {
+        assert!(has_username_option(&["username=alice".to_string()]));
+        assert!(has_username_option(&["username".to_string()]));
+        assert!(!has_username_option(&["notusername=alice".to_string()]));
+        assert!(!has_username_option(&["guest".to_string()]));
+    }
+
+    #[test]
+    fn test_mount_output_parser_matches_exact_mountpoint() {
+        let out = "//server/share on /mnt/music (smbfs, nodev, nosuid)\n//server/other on /mnt/music2 (smbfs)\n";
+        assert!(mount_output_contains_mountpoint(out, "/mnt/music"));
+        assert!(!mount_output_contains_mountpoint(out, "/mnt/mus"));
+    }
+
+    #[test]
+    fn test_is_already_unmounted_message_patterns() {
+        assert!(is_already_unmounted_message("umount: /tmp/x: not mounted"));
+        assert!(is_already_unmounted_message(
+            "umount: /tmp/x: not currently mounted"
+        ));
+        assert!(!is_already_unmounted_message("permission denied"));
     }
 
     #[test]

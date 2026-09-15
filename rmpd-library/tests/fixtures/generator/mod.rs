@@ -4,6 +4,7 @@
 /// Files are cached in target/test-fixtures/ to avoid regenerating on each test run.
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
 use tempfile::TempDir;
 
 pub use rmpd_core::test_utils::AudioFormat;
@@ -46,6 +47,45 @@ pub struct FixtureGenerator {
 }
 
 impl FixtureGenerator {
+    fn metadata_fingerprint(format: AudioFormat, metadata: &TestMetadata, with_artwork: bool) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        format.extension().hash(&mut hasher);
+        metadata.title.hash(&mut hasher);
+        metadata.artist.hash(&mut hasher);
+        metadata.album.hash(&mut hasher);
+        metadata.album_artist.hash(&mut hasher);
+        metadata.genre.hash(&mut hasher);
+        metadata.date.hash(&mut hasher);
+        metadata.track.hash(&mut hasher);
+        metadata.disc.hash(&mut hasher);
+        metadata.composer.hash(&mut hasher);
+        metadata.comment.hash(&mut hasher);
+        with_artwork.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn build_cache_key(format: AudioFormat, metadata: &TestMetadata, with_artwork: bool) -> String {
+        let mut cache_key = format!(
+            "{}_{}_{}_{}_{}",
+            format.extension(),
+            sanitize_for_filename(&metadata.title),
+            sanitize_for_filename(&metadata.artist),
+            sanitize_for_filename(&metadata.album),
+            sanitize_for_filename(metadata.genre.as_deref().unwrap_or("noGenre"))
+        );
+        if with_artwork {
+            cache_key.push_str("_withArt");
+        }
+        let fp = Self::metadata_fingerprint(format, metadata, with_artwork);
+        cache_key.push('_');
+        cache_key.push_str(&format!("{fp:016x}"));
+
+        if cache_key.len() > 200 {
+            cache_key.truncate(200);
+        }
+        cache_key
+    }
+
     pub fn new() -> Result<Self, String> {
         let cache_dir = PathBuf::from("target/test-fixtures");
         std::fs::create_dir_all(&cache_dir)
@@ -63,18 +103,7 @@ impl FixtureGenerator {
         format: AudioFormat,
         metadata: &TestMetadata,
     ) -> Result<PathBuf, String> {
-        let mut cache_key = format!(
-            "{}_{}_{}_{}_{}",
-            format.extension(),
-            sanitize_for_filename(&metadata.title),
-            sanitize_for_filename(&metadata.artist),
-            sanitize_for_filename(&metadata.album),
-            sanitize_for_filename(metadata.genre.as_deref().unwrap_or("noGenre"))
-        );
-
-        if cache_key.len() > 200 {
-            cache_key.truncate(200);
-        }
+        let cache_key = Self::build_cache_key(format, metadata, false);
 
         let cached_path = self
             .cache_dir
@@ -229,19 +258,7 @@ impl FixtureGenerator {
             }
         }
 
-        let mut cache_key = format!(
-            "{}_{}_{}_{}_{}",
-            format.extension(),
-            sanitize_for_filename(&metadata.title),
-            sanitize_for_filename(&metadata.artist),
-            sanitize_for_filename(&metadata.album),
-            sanitize_for_filename(metadata.genre.as_deref().unwrap_or("noGenre"))
-        );
-        cache_key.push_str("_withArt");
-
-        if cache_key.len() > 200 {
-            cache_key.truncate(200);
-        }
+        let cache_key = Self::build_cache_key(format, metadata, true);
 
         let cached_path = self
             .cache_dir
@@ -335,6 +352,46 @@ mod tests {
     fn test_sanitize_for_filename() {
         let result = sanitize_for_filename("test/file:name");
         assert_eq!(result, "test_file_name");
+    }
+
+    #[test]
+    fn test_build_cache_key_avoids_sanitization_collision() {
+        let m1 = TestMetadata {
+            title: "A/B".to_string(),
+            artist: "X".to_string(),
+            album: "Y".to_string(),
+            genre: Some("Rock".to_string()),
+            ..Default::default()
+        };
+        let m2 = TestMetadata {
+            title: "A:B".to_string(),
+            artist: "X".to_string(),
+            album: "Y".to_string(),
+            genre: Some("Rock".to_string()),
+            ..Default::default()
+        };
+
+        // Sanitized visible prefixes collide, but fingerprint suffix must differ.
+        assert_eq!(sanitize_for_filename(&m1.title), sanitize_for_filename(&m2.title));
+        let k1 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m1, false);
+        let k2 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m2, false);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_build_cache_key_includes_non_filename_metadata() {
+        let m1 = TestMetadata {
+            track: Some(1),
+            ..Default::default()
+        };
+        let m2 = TestMetadata {
+            track: Some(2),
+            ..Default::default()
+        };
+
+        let k1 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m1, false);
+        let k2 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m2, false);
+        assert_ne!(k1, k2);
     }
 
     #[test]

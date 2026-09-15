@@ -74,7 +74,7 @@ impl AppState {
         let event_bus = EventBus::new();
         let status = Arc::new(RwLock::new(PlayerStatus::default()));
         let atomic_state = Arc::new(std::sync::atomic::AtomicU8::new(
-            rmpd_core::state::PlayerState::Stop as u8,
+            rmpd_core::state::PlayerState::Stop.to_atomic(),
         ));
         let engine = PlaybackEngine::new(event_bus.clone(), status.clone(), atomic_state.clone());
 

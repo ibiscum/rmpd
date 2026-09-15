@@ -1,4 +1,4 @@
-/// Shared tag utilities: fallback chains, normalization, and canonical mappings.
+/// Shared tag utilities: fallback chains, decimal normalization, and Vorbis key mappings.
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -43,9 +43,11 @@ static VORBIS_TAG_MAP_HASH: LazyLock<HashMap<&'static str, &'static str>> = Lazy
 });
 
 /// Return the fallback chain for a tag (MPD's Fallback.hxx).
+/// Input matching is case-insensitive for known tags.
 /// For most tags, returns a single-element vec.
 pub fn tag_fallback_chain(tag: &str) -> Vec<&str> {
-    match tag {
+    let tag_lower = tag.to_lowercase();
+    match tag_lower.as_str() {
         "albumartist" => vec!["albumartist", "artist"],
         "artistsort" => vec!["artistsort", "artist"],
         "albumartistsort" => vec!["albumartistsort", "albumartist", "artistsort", "artist"],
@@ -77,7 +79,7 @@ pub fn tag_fallback_chain(tag: &str) -> Vec<&str> {
 }
 
 /// Normalize a Track or Disc value the same way MPD does (Handler.cxx NormalizeDecimal):
-/// strip leading zeros, strip non-digit suffix, treat all-zero result as empty (skip).
+/// strip leading zeros, strip non-digit suffix, preserve all-zero result as "0".
 pub fn normalize_decimal(s: &str) -> Option<String> {
     let s = s.trim();
     // Find first non-zero digit
@@ -101,8 +103,43 @@ pub fn normalize_decimal(s: &str) -> Option<String> {
 
 /// MPD-canonical VorbisComment key -> tag name mapping.
 /// Derived from MPD's tag/Names.cxx (tag_item_names) + lib/xiph/XiphTags.cxx.
-/// Only these exact key names (case-insensitive) are recognized for structured tags.
+/// Only these key names are recognized for structured tags (lookup is case-insensitive).
 /// Returns the tag name for a given VorbisComment key, or None if not found.
 pub fn vorbis_tag_map_get(key: &str) -> Option<&'static str> {
-    VORBIS_TAG_MAP_HASH.get(key).copied()
+    let key_lower = key.to_lowercase();
+    VORBIS_TAG_MAP_HASH.get(key_lower.as_str()).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_decimal, tag_fallback_chain, vorbis_tag_map_get};
+
+    #[test]
+    fn fallback_chain_known_tags_is_case_insensitive() {
+        assert_eq!(tag_fallback_chain("AlbumArtist"), vec!["albumartist", "artist"]);
+        assert_eq!(tag_fallback_chain("TitleSort"), vec!["titlesort", "title"]);
+    }
+
+    #[test]
+    fn fallback_chain_unknown_tag_is_preserved() {
+        assert_eq!(tag_fallback_chain("CustomTag"), vec!["CustomTag"]);
+    }
+
+    #[test]
+    fn normalize_decimal_edge_cases() {
+        assert_eq!(normalize_decimal("0"), Some("0".to_string()));
+        assert_eq!(normalize_decimal("00"), Some("0".to_string()));
+        assert_eq!(normalize_decimal("003/12"), Some("3".to_string()));
+        assert_eq!(normalize_decimal("000abc"), Some("0".to_string()));
+        assert_eq!(normalize_decimal("  0012x  "), Some("12".to_string()));
+        assert_eq!(normalize_decimal("abc"), None);
+        assert_eq!(normalize_decimal(""), None);
+    }
+
+    #[test]
+    fn vorbis_map_lookup_is_case_insensitive() {
+        assert_eq!(vorbis_tag_map_get("TRACKNUMBER"), Some("track"));
+        assert_eq!(vorbis_tag_map_get("Description"), Some("comment"));
+        assert_eq!(vorbis_tag_map_get("unknown_key"), None);
+    }
 }

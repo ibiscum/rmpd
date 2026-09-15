@@ -1,0 +1,5 @@
+error: expected integer literal for `permission`
+ --> tests/ui/compile_fail/permission_not_integer.rs:5:30
+  |
+5 |     #[command(name = "play", permission = "admin")]
+  |                              ^^^^^^^^^^^^^^^^^^^^

@@ -401,13 +401,16 @@ pub async fn handle_playid_command(state: &AppState, id: Option<u32>) -> String 
 /// Sets the priority for all songs within the specified position ranges.
 /// Priority is 0-255 where higher values have higher priority.
 pub async fn handle_prio_command(state: &AppState, priority: u8, ranges: &[(u32, u32)]) -> String {
-    let version = {
+    let (changed, version) = {
         let mut queue = state.queue.write().await;
-        queue.set_priority_range(priority, ranges);
-        queue.version()
+        let changed = queue.set_priority_range(priority, ranges);
+        (changed, queue.version())
     };
-    state.status.write().await.playlist_version = version;
-    state.event_bus.emit(rmpd_core::event::Event::QueueChanged);
+
+    if changed {
+        state.status.write().await.playlist_version = version;
+        state.event_bus.emit(rmpd_core::event::Event::QueueChanged);
+    }
 
     ResponseBuilder::new().ok()
 }
@@ -463,7 +466,7 @@ pub async fn handle_rangeid_command(state: &AppState, id: u32, range: (f64, f64)
 /// Adds a custom tag to a queue item.
 pub async fn handle_addtagid_command(state: &AppState, id: u32, tag: &str, _value: &str) -> String {
     // Validate tag type
-    if rmpd_core::song::canonical_tag_name(&tag.to_lowercase()) == "Unknown" {
+    if !rmpd_core::song::is_known_tag_name(tag) {
         return ResponseBuilder::error(
             ACK_ERROR_ARG,
             0,
@@ -492,7 +495,7 @@ pub async fn handle_cleartagid_command(state: &AppState, id: u32, tag: Option<&s
     let tag = tag.filter(|t| !t.is_empty());
     // Validate tag type if specified
     if let Some(t) = tag
-        && rmpd_core::song::canonical_tag_name(&t.to_lowercase()) == "Unknown"
+        && !rmpd_core::song::is_known_tag_name(t)
     {
         return ResponseBuilder::error(
             ACK_ERROR_ARG,

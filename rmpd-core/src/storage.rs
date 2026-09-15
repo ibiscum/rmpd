@@ -19,8 +19,8 @@ pub struct MountPoint {
     pub protocol: String,
     /// Whether the mount is currently active
     pub mounted: bool,
-    /// Timestamp when the mount was established
-    pub mounted_at: SystemTime,
+    /// Timestamp when the mount was established (None if not currently mounted)
+    pub mounted_at: Option<SystemTime>,
 }
 
 impl MountPoint {
@@ -33,7 +33,7 @@ impl MountPoint {
             uri,
             protocol,
             mounted: false,
-            mounted_at: SystemTime::now(),
+            mounted_at: None,
         }
     }
 
@@ -76,9 +76,13 @@ impl MountRegistry {
     pub async fn register_mounted(&self, path: String, uri: String) -> Result<(), String> {
         let mut mounts = self.mounts.write().await;
 
+        if mounts.contains_key(&path) {
+            return Err(format!("Mount point already exists: {path}"));
+        }
+
         let mut mount_point = MountPoint::new(path.clone(), uri);
         mount_point.mounted = true;
-        mount_point.mounted_at = SystemTime::now();
+        mount_point.mounted_at = Some(SystemTime::now());
 
         mounts.insert(path, mount_point);
         Ok(())
@@ -98,7 +102,9 @@ impl MountRegistry {
     /// List all registered mounts
     pub async fn list(&self) -> Vec<MountPoint> {
         let mounts = self.mounts.read().await;
-        mounts.values().cloned().collect()
+        let mut out: Vec<MountPoint> = mounts.values().cloned().collect();
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
     }
 
     /// Get a specific mount point
@@ -116,7 +122,19 @@ impl MountRegistry {
     /// Load mounts from serialized data
     pub async fn load(&self, data: HashMap<String, MountPoint>) {
         let mut mounts = self.mounts.write().await;
-        *mounts = data;
+        let mut normalized = HashMap::with_capacity(data.len());
+        for (key, mut mount) in data {
+            // Keep key/path consistent so lookup and listing refer to the same mount path.
+            mount.path = key.clone();
+            // Ensure timestamp semantics match mounted flag.
+            if !mount.mounted {
+                mount.mounted_at = None;
+            } else if mount.mounted_at.is_none() {
+                mount.mounted_at = Some(SystemTime::now());
+            }
+            normalized.insert(key, mount);
+        }
+        *mounts = normalized;
     }
 
     /// Get all mounts as a HashMap for serialization
@@ -155,6 +173,7 @@ mod tests {
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].path, "remote/nas");
         assert_eq!(mounts[0].protocol, "nfs");
+        assert_eq!(mounts[0].mounted_at, None);
     }
 
     #[tokio::test]
@@ -220,6 +239,7 @@ mod tests {
             .unwrap();
 
         assert!(!registry.is_mounted("remote/nas").await);
+        assert!(registry.get("remote/nas").await.unwrap().mounted_at.is_none());
 
         registry
             .register_mounted(
@@ -230,5 +250,72 @@ mod tests {
             .unwrap();
 
         assert!(registry.is_mounted("remote/nas2").await);
+        assert!(registry.get("remote/nas2").await.unwrap().mounted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_register_mounted_rejects_duplicates() {
+        let registry = MountRegistry::new();
+
+        registry
+            .register_mounted(
+                "remote/nas".to_string(),
+                "nfs://192.168.1.100/music".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let result = registry
+            .register_mounted(
+                "remote/nas".to_string(),
+                "nfs://192.168.1.200/music".to_string(),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn test_list_is_sorted_by_path() {
+        let registry = MountRegistry::new();
+
+        registry
+            .register("z/path".to_string(), "nfs://z/music".to_string())
+            .await
+            .unwrap();
+        registry
+            .register("a/path".to_string(), "nfs://a/music".to_string())
+            .await
+            .unwrap();
+
+        let mounts = registry.list().await;
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].path, "a/path");
+        assert_eq!(mounts[1].path, "z/path");
+    }
+
+    #[tokio::test]
+    async fn test_load_normalizes_inconsistent_entries() {
+        let registry = MountRegistry::new();
+        let mut data = HashMap::new();
+
+        data.insert(
+            "remote/fixed".to_string(),
+            MountPoint {
+                path: "wrong/path".to_string(),
+                uri: "nfs://server/share".to_string(),
+                protocol: "nfs".to_string(),
+                mounted: false,
+                mounted_at: Some(SystemTime::now()),
+            },
+        );
+
+        registry.load(data).await;
+
+        let mount = registry.get("remote/fixed").await.unwrap();
+        assert_eq!(mount.path, "remote/fixed");
+        assert!(!mount.mounted);
+        assert!(mount.mounted_at.is_none());
     }
 }
