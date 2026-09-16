@@ -1,6 +1,6 @@
 //! Database and library browsing command handlers
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::helpers;
 use crate::response::{Response, ResponseBuilder};
@@ -261,12 +261,13 @@ pub async fn handle_list_command(
             tree.insert_path(&value_sets);
         }
 
-        let display_names: Vec<&str> = names
+        let display_names: Vec<String> = names
             .iter()
-            .map(|n| rmpd_core::song::canonical_tag_name(n))
+            .map(|n| rmpd_core::song::canonical_tag_name(n).into_owned())
             .collect();
+        let display_name_refs: Vec<&str> = display_names.iter().map(|s| s.as_str()).collect();
         let mut resp = ResponseBuilder::new();
-        print_tag_tree(&mut resp, &display_names, &tree, window);
+        print_tag_tree(&mut resp, &display_name_refs, &tree, window);
         resp.ok()
     })
     .await
@@ -373,7 +374,7 @@ async fn handle_count_core(
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             let tag_key = rmpd_core::song::canonical_tag_name(group_tag);
             for (value, (count, playtime)) in &sorted {
-                resp.field(tag_key, value);
+                resp.field(&tag_key, value);
                 resp.field("songs", count);
                 resp.field("playtime", playtime.floor() as u64);
             }
@@ -488,7 +489,7 @@ pub async fn handle_albumart_command(state: &AppState, uri: &str, offset: usize)
         let uri_owned = uri.to_string();
         let (extractor, is_cached) = match tokio::task::spawn_blocking(move || {
             let extractor = rmpd_library::AlbumArtExtractor::new(db);
-            let cached = extractor.is_cached(&uri_owned);
+            let cached = extractor.is_cached(&uri_owned).unwrap_or(false);
             (extractor, cached)
         })
         .await
@@ -652,7 +653,7 @@ pub async fn handle_readpicture_command(state: &AppState, uri: &str, offset: usi
         let uri_owned = uri.to_string();
         let (extractor, is_cached) = match tokio::task::spawn_blocking(move || {
             let extractor = rmpd_library::AlbumArtExtractor::new(db);
-            let cached = extractor.is_cached(&uri_owned);
+            let cached = extractor.is_cached(&uri_owned).unwrap_or(false);
             (extractor, cached)
         })
         .await

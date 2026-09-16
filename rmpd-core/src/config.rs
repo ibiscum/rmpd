@@ -700,11 +700,10 @@ impl Config {
     fn defaults_load(mut diagnostics: Vec<Diagnostic>) -> Result<ConfigLoad> {
         let mut config = Self::default();
         config.expand_paths();
-        config.validate()?;
+        Self::validate_and_normalize(&mut config, &mut diagnostics)?;
         // Keep invalid configs side-effect free: only create directories after
         // all validation checks pass.
         config.ensure_directories();
-        Self::validate_and_normalize(&mut config, &mut diagnostics)?;
         Ok(ConfigLoad {
             config,
             source: ConfigSource::Defaults,
@@ -725,8 +724,10 @@ impl Config {
 
         let mut diagnostics = Self::lint(&content);
         config.expand_paths();
-        config.ensure_directories();
         Self::validate_and_normalize(&mut config, &mut diagnostics)?;
+        // Keep invalid configs side-effect free: only create directories after
+        // all validation checks pass.
+        config.ensure_directories();
         Ok((config, diagnostics))
     }
 

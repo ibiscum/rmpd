@@ -78,33 +78,36 @@ impl Scanner {
         let result = (|| {
             let mut stats = ScanStats::default();
 
-        // Build a scanner variant that knows the music directory so that make_relative_path
-        // can strip the root prefix from absolute paths during the scan. If `self` already
-        // has one configured (a scan of one of its own subtrees), keep it — `root_path` is
-        // then a subtree root, not the library root, and prune_missing/file_is_present need
-        // the real root to resolve database-relative paths back to disk.
-        let utf8_root = Utf8PathBuf::try_from(root_path.to_path_buf())
-            .map_err(|_| RmpdError::Library("Music directory path is not valid UTF-8".into()))?;
-        let scanner_with_dir = self.with_music_dir(
-            self.music_directory
-                .clone()
-                .unwrap_or_else(|| utf8_root.clone()),
-        );
+            // Build a scanner variant that knows the music directory so that make_relative_path
+            // can strip the root prefix from absolute paths during the scan. If `self` already
+            // has one configured (a scan of one of its own subtrees), keep it — `root_path` is
+            // then a subtree root, not the library root, and prune_missing/file_is_present need
+            // the real root to resolve database-relative paths back to disk.
+            let utf8_root = Utf8PathBuf::try_from(root_path.to_path_buf())
+                .map_err(|_| RmpdError::Library("Music directory path is not valid UTF-8".into()))?;
+            let scanner_with_dir = self.with_music_dir(
+                self.music_directory
+                    .clone()
+                    .unwrap_or_else(|| utf8_root.clone()),
+            );
 
-        scanner_with_dir.scan_recursive(db, root_path, &mut stats)?;
+            scanner_with_dir.scan_recursive(db, root_path, &mut stats)?;
 
-        let prefix = scanner_with_dir.make_relative_path(&utf8_root)?;
-        scanner_with_dir.prune_missing(db, prefix.as_str(), &mut stats);
-        scanner_with_dir.prune_empty_directories(db, &mut stats);
+            let prefix = scanner_with_dir.make_relative_path(&utf8_root)?;
+            scanner_with_dir.prune_missing(db, prefix.as_str(), &mut stats);
+            scanner_with_dir.prune_empty_directories(db, &mut stats);
 
-        info!(
-            "scan complete: {} files scanned, {} added, {} updated, {} removed, {} errors",
-            stats.scanned, stats.added, stats.updated, stats.removed, stats.errors
-        );
+            info!(
+                "scan complete: {} files scanned, {} added, {} updated, {} removed, {} errors",
+                stats.scanned, stats.added, stats.updated, stats.removed, stats.errors
+            );
+
+            Ok(stats)
+        })();
 
         self.event_bus.emit(Event::DatabaseUpdateFinished);
 
-        Ok(stats)
+        result
     }
 
     /// Delete local song rows at or under `prefix` whose file is no longer present on disk.

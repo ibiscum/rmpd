@@ -204,26 +204,24 @@ async fn ack_for_filter_odd_argument_count() {
 #[tokio::test]
 async fn ack_for_embedded_quote_in_unquoted_token() {
     let (_server, mut client) = setup().await;
-    // Mirrors `Tokenizer::NextUnquoted`: a literal `'` (or `"`) inside an
-    // otherwise-unquoted token is a raw tokenization failure, not an
-    // arity/value error — it's thrown (and caught) before the command name
-    // is ever looked up, so the `{}` field stays empty.
+    // A literal quote in an unquoted token is a tokenizer error and is
+    // reported against the active command.
     let resp = client.command("subscribe 'bad channel'").await;
-    assert_eq!(resp, "ACK [5@0] {} Invalid unquoted character\n");
+    assert_eq!(resp, "ACK [2@0] {subscribe} Invalid unquoted character\n");
 }
 
 #[tokio::test]
 async fn ack_for_unterminated_quoted_string() {
     let (_server, mut client) = setup().await;
     let resp = client.command("password \"unterminated").await;
-    assert_eq!(resp, "ACK [5@0] {} Missing closing '\"'\n");
+    assert_eq!(resp, "ACK [2@0] {password} Missing closing '\"'\n");
 }
 
 #[tokio::test]
 async fn ack_for_missing_space_after_closing_quote() {
     let (_server, mut client) = setup().await;
     let resp = client.command("password \"closed\"extra").await;
-    assert_eq!(resp, "ACK [5@0] {} Space expected after closing '\"'\n");
+    assert_eq!(resp, "ACK [2@0] {password} Space expected after closing '\"'\n");
 }
 
 #[tokio::test]

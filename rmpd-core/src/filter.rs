@@ -28,7 +28,7 @@
 //! per-pair dispatch (same special tag names, AND-combined).
 use crate::error::{Result, RmpdError};
 use crate::path::uri_safe_local;
-use crate::song::canonical_tag_name;
+use crate::song::is_known_tag_name;
 use crate::tag::tag_fallback_chain;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +105,7 @@ fn classify_filter_keyword(name: &str) -> FilterKeyword {
 }
 
 fn is_known_tag(tag_lower: &str) -> bool {
-    canonical_tag_name(tag_lower) != "Unknown"
+    is_known_tag_name(tag_lower)
 }
 
 // `uri_safe_local` (only the legacy 2-arg `base` form is checked this way;

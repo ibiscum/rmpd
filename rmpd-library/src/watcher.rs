@@ -144,7 +144,7 @@ async fn handle_fs_event(
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             for path in &event.paths {
-                if !is_audio_file(path) {
+                if !is_supported_audio_file(path) {
                     prune_if_vanished_directory(path, music_dir, db, event_bus).await?;
                     continue;
                 }
@@ -226,7 +226,7 @@ async fn handle_fs_event(
         }
         EventKind::Remove(_) => {
             for path in &event.paths {
-                if !is_audio_file(path) {
+                if !is_supported_audio_file(path) {
                     prune_if_vanished_directory(path, music_dir, db, event_bus).await?;
                     continue;
                 }
@@ -283,7 +283,7 @@ async fn remove_song_row(
 /// path) that was removed or moved away out from under the watcher: `notify`
 /// reports the event on the directory path itself, not on each audio file
 /// inside it, so none of those files' own `Remove`/`Modify` events ever fire
-/// and `is_audio_file` never sees them. Prune every local row under it.
+/// and `is_supported_audio_file` never sees them. Prune every local row under it.
 /// A path that still exists (e.g. a directory that is untouched, or some
 /// other non-audio file) is left alone — the caller already skips it.
 /// If `path` *is* the music directory itself, `strip_prefix` yields `""`,
@@ -481,7 +481,7 @@ mod tests {
 
     /// A directory removed or moved away arrives from `notify` as a modify/rename
     /// event on the directory's own path (backends differ; inotify reports
-    /// `MOVED_FROM`), not one event per file inside it — `is_audio_file` never
+    /// `MOVED_FROM`), not one event per file inside it — `is_supported_audio_file` never
     /// matches a directory, so without special handling every row under it would
     /// be left behind (issue #12 follow-up).
     #[tokio::test]

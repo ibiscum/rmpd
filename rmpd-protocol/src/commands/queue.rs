@@ -776,7 +776,8 @@ pub async fn handle_rangeid_command(
 /// remote songs (a `scheme://` URI) may have tags edited — local/database
 /// files are rejected.
 pub async fn handle_addtagid_command(state: &AppState, id: u32, tag: &str, value: &str) -> String {
-    let canonical = rmpd_core::song::canonical_tag_name(&tag.to_lowercase());
+    let tag_lower = tag.to_lowercase();
+    let canonical = rmpd_core::song::canonical_tag_name(&tag_lower).into_owned();
     if canonical == "Unknown" {
         return ResponseBuilder::error(
             ACK_ERROR_ARG,
@@ -808,7 +809,7 @@ pub async fn handle_addtagid_command(state: &AppState, id: u32, tag: &str, value
         .queue
         .write()
         .await
-        .add_tag_by_id(id, canonical.to_string(), value.to_string());
+        .add_tag_by_id(id, canonical, value.to_string());
     helpers::update_playlist_version(state).await;
     ResponseBuilder::new().ok()
 }
@@ -821,9 +822,10 @@ pub async fn handle_addtagid_command(state: &AppState, id: u32, tag: &str, value
 pub async fn handle_cleartagid_command(state: &AppState, id: u32, tag: Option<&str>) -> String {
     // Normalize empty tag to None (parser may return Some("") for missing arg)
     let tag = tag.filter(|t| !t.is_empty());
-    let canonical = match tag {
+    let canonical: Option<String> = match tag {
         Some(t) => {
-            let c = rmpd_core::song::canonical_tag_name(&t.to_lowercase());
+            let t_lower = t.to_lowercase();
+            let c = rmpd_core::song::canonical_tag_name(&t_lower).into_owned();
             if c == "Unknown" {
                 return ResponseBuilder::error(
                     ACK_ERROR_ARG,
@@ -855,7 +857,11 @@ pub async fn handle_cleartagid_command(state: &AppState, id: u32, tag: Option<&s
         }
     }
 
-    state.queue.write().await.clear_tags_by_id(id, canonical);
+    state
+        .queue
+        .write()
+        .await
+        .clear_tags_by_id(id, canonical.as_deref());
     helpers::update_playlist_version(state).await;
     ResponseBuilder::new().ok()
 }

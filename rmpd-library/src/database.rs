@@ -890,7 +890,7 @@ impl Database {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT st.value FROM song_tags st
                  WHERE st.tag = ?1
-                   AND st.song_id NOT IN (SELECT song_id FROM song_tags WHERE tag = ?2)",
+                     AND st.song_id NOT IN (SELECT song_id FROM song_tags WHERE tag = ?2 AND value != '')",
             )?;
             for fallback in &chain[1..] {
                 let vals: Vec<String> = stmt
@@ -1430,10 +1430,22 @@ impl Database {
     /// tree-walk order (see `rmpd_core::path::compare_db_path`) — used by
     /// `add DIRECTORY` / `add /`.
     pub fn list_directory_recursive(&self, path: &str) -> Result<Vec<Song>> {
-        let sql = format!("SELECT {SONG_COLUMNS} FROM songs WHERE path LIKE ?1 || '%'");
+        let (sql, params): (String, Vec<String>) = if path.is_empty() || path == "/" {
+            (format!("SELECT {SONG_COLUMNS} FROM songs"), Vec::new())
+        } else {
+            (
+                format!(
+                    "SELECT {SONG_COLUMNS} FROM songs WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'"
+                ),
+                vec![
+                    path.to_owned(),
+                    format!("{path}/%"),
+                ],
+            )
+        };
         let mut stmt = self.conn.prepare(&sql)?;
         let mut songs: Vec<Song> = stmt
-            .query_map(params![path], song_from_row)?
+            .query_map(rusqlite::params_from_iter(params.iter()), song_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         self.load_tags_for_songs(&mut songs)?;
         songs.sort_by(|a, b| rmpd_core::path::compare_db_path(a.path.as_str(), b.path.as_str()));

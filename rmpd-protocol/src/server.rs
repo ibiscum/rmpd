@@ -52,11 +52,7 @@ const MAX_COMMAND_LIST_BYTES: usize = 2 * 1024 * 1024;
 /// expected: X", "Malformed range: X", "Incorrect number of filter
 /// arguments", ...) — which gets code 2 against the real command name.
 fn parse_error_to_ack(cmd_line: &str, err: &str, index: i32) -> String {
-    if err.starts_with("unknown command \"")
-        || err == "Invalid unquoted character"
-        || err == "Missing closing '\"'"
-        || err == "Space expected after closing '\"'"
-    {
+    if err.starts_with("unknown command \"") {
         return ResponseBuilder::error(ACK_ERROR_UNKNOWN, index, "", err);
     }
     let cmd_name = cmd_line.split_whitespace().next().unwrap_or(cmd_line);
@@ -633,8 +629,10 @@ async fn execute_command_list(
             }
             Err(e) => {
                 // Parse error - return ACK with index
+                let ack = parse_error_to_ack(cmd_str, &e, index as i32);
+                response.push_str(&ack);
                 return (
-                    Response::Text(parse_error_to_ack(cmd_str, &e, index as i32)),
+                    Response::Text(response),
                     false,
                 );
             }
