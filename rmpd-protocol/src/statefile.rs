@@ -1,9 +1,9 @@
-use rmpd_core::error::Result;
+use rmpd_core::error::{Result, RmpdError};
 use rmpd_core::queue::Queue;
 use rmpd_core::state::{PlayerState, PlayerStatus, ReplayGainMode};
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Save and restore MPD-compatible state file
 #[derive(Debug)]
@@ -78,6 +78,13 @@ impl StateFile {
             content.push_str(&format!("audio_device_state:0:{name}\n"));
         }
 
+        // Last stored playlist loaded via `load` (MPD: PlaylistState.cxx,
+        // written unconditionally, empty when none has been loaded).
+        content.push_str(&format!(
+            "lastloadedplaylist: {}\n",
+            queue.last_loaded_playlist()
+        ));
+
         // Playlist
         content.push_str("playlist_begin\n");
         for item in queue.items() {
@@ -85,10 +92,17 @@ impl StateFile {
         }
         content.push_str("playlist_end\n");
 
-        // Write to file atomically (write to temp, then rename)
-        let temp_path = format!("{}.tmp", self.path);
-        fs::write(&temp_path, content)?;
-        fs::rename(&temp_path, &self.path)?;
+        // Write to file atomically (write to temp, then rename). Runs on a
+        // blocking-pool thread since fs::write/fs::rename block the caller.
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let temp_path = format!("{path}.tmp");
+            fs::write(&temp_path, content)?;
+            fs::rename(&temp_path, &path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| RmpdError::Protocol(format!("spawn_blocking panicked: {e}")))??;
 
         info!("state saved to {}", self.path);
         Ok(())
@@ -138,7 +152,10 @@ impl StateFile {
 
                     match key {
                         "sw_volume" => {
-                            state.volume = value.parse().unwrap_or(100);
+                            state.volume = value.parse().unwrap_or_else(|_| {
+                                warn!("invalid sw_volume value in state file: {value:?}");
+                                100
+                            });
                         }
                         "state" => {
                             state.state = match value {
@@ -149,10 +166,16 @@ impl StateFile {
                             };
                         }
                         "current" => {
-                            state.current_position = value.parse().ok();
+                            state.current_position = value.parse().ok().or_else(|| {
+                                warn!("invalid current value in state file: {value:?}");
+                                None
+                            });
                         }
                         "time" => {
-                            state.elapsed_seconds = value.parse().ok();
+                            state.elapsed_seconds = value.parse().ok().or_else(|| {
+                                warn!("invalid time value in state file: {value:?}");
+                                None
+                            });
                         }
                         "random" => {
                             state.random = value == "1";
@@ -175,16 +198,28 @@ impl StateFile {
                             };
                         }
                         "crossfade" => {
-                            state.crossfade = value.parse().unwrap_or(0);
+                            state.crossfade = value.parse().unwrap_or_else(|_| {
+                                warn!("invalid crossfade value in state file: {value:?}");
+                                0
+                            });
                         }
                         "mixrampdb" => {
-                            state.mixramp_db = value.parse().unwrap_or(0.0);
+                            state.mixramp_db = value.parse().unwrap_or_else(|_| {
+                                warn!("invalid mixrampdb value in state file: {value:?}");
+                                0.0
+                            });
                         }
                         "mixrampdelay" => {
-                            state.mixramp_delay = value.parse().unwrap_or(-1.0);
+                            state.mixramp_delay = value.parse().unwrap_or_else(|_| {
+                                warn!("invalid mixrampdelay value in state file: {value:?}");
+                                -1.0
+                            });
                         }
                         "replay_gain_mode" => {
                             state.replay_gain_mode = ReplayGainMode::parse_mode(value);
+                        }
+                        "lastloadedplaylist" => {
+                            state.last_loaded_playlist = value.to_string();
                         }
                         "audio_device_state" => {
                             // value is "STATE:NAME" where NAME may contain ':'
@@ -224,6 +259,9 @@ pub struct SavedState {
     pub replay_gain_mode: ReplayGainMode,
     pub playlist_paths: Vec<String>,
     pub disabled_outputs: Vec<String>,
+    /// Last stored playlist loaded via `load` before the state was saved
+    /// (MPD's `lastloadedplaylist`); empty when none had been loaded.
+    pub last_loaded_playlist: String,
 }
 
 #[cfg(test)]
@@ -244,6 +282,7 @@ mod tests {
         let mut queue = Queue::new();
         queue.add(make_test_song("/music/song1.mp3", 0));
         queue.add(make_test_song("/music/song2.mp3", 1));
+        queue.set_last_loaded_playlist("favorites");
 
         let status = PlayerStatus {
             volume: 75,
@@ -284,6 +323,7 @@ mod tests {
         assert_eq!(loaded.playlist_paths.len(), 2);
         assert_eq!(loaded.playlist_paths[0], "/music/song1.mp3");
         assert_eq!(loaded.playlist_paths[1], "/music/song2.mp3");
+        assert_eq!(loaded.last_loaded_playlist, "favorites");
     }
 
     #[tokio::test]
