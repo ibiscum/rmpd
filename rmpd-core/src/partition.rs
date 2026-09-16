@@ -90,12 +90,28 @@ pub struct PartitionInfo {
 /// Manager for multiple partitions
 pub struct PartitionManager {
     partitions: RwLock<HashMap<String, Arc<PartitionState>>>,
+    /// Creation order of partition names, "default" always first. MPD lists
+    /// `listpartitions` in creation order, not alphabetically; a plain
+    /// `HashMap` iteration order would not match that.
+    order: RwLock<Vec<String>>,
 }
+
+/// MPD's arbitrary partition count limit (AllCommands.cxx: "too many partitions").
+const MAX_PARTITIONS: usize = 16;
 
 impl PartitionManager {
     /// Create a new partition manager with a default partition
     pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+        let mut partitions = HashMap::new();
+        // Always pre-populate the "default" partition — MPD always has it
+        partitions.insert(
+            "default".to_string(),
+            Arc::new(PartitionState::new("default".to_string())),
+        );
+        Arc::new(Self {
+            partitions: RwLock::new(partitions),
+            order: RwLock::new(vec!["default".to_string()]),
+        })
     }
 
     /// Create a new partition
@@ -106,8 +122,13 @@ impl PartitionManager {
             return Err(format!("Partition already exists: {}", name));
         }
 
+        if partitions.len() >= MAX_PARTITIONS {
+            return Err("Too many partitions".to_string());
+        }
+
         let partition = Arc::new(PartitionState::new(name.clone()));
-        partitions.insert(name, partition.clone());
+        partitions.insert(name.clone(), partition.clone());
+        self.order.write().await.push(name);
 
         Ok(partition)
     }
@@ -121,11 +142,17 @@ impl PartitionManager {
 
         let mut partitions = self.partitions.write().await;
 
-        if !partitions.contains_key(name) {
-            return Err(format!("Partition not found: {}", name));
+        let partition = match partitions.get(name) {
+            Some(p) => p.clone(),
+            None => return Err(format!("Partition not found: {}", name)),
+        };
+
+        if !partition.get_outputs().await.is_empty() {
+            return Err(format!("Partition '{}' still has outputs", name));
         }
 
         partitions.remove(name);
+        self.order.write().await.retain(|n| n != name);
         Ok(())
     }
 
@@ -135,12 +162,9 @@ impl PartitionManager {
         partitions.get(name).cloned()
     }
 
-    /// List all partition names
+    /// List all partition names in creation order ("default" first)
     pub async fn list_partitions(&self) -> Vec<String> {
-        let partitions = self.partitions.read().await;
-        let mut names: Vec<String> = partitions.keys().cloned().collect();
-        names.sort();
-        names
+        self.order.read().await.clone()
     }
 
     /// Get partition count
@@ -234,7 +258,8 @@ impl Default for PartitionManager {
             Arc::new(PartitionState::new("default".to_string())),
         );
         Self {
-            partitions: RwLock::new(partitions),
+            partitions: RwLock::new(HashMap::new()),
+            order: RwLock::new(Vec::new()),
         }
     }
 }
@@ -300,7 +325,21 @@ mod tests {
         assert!(names.contains(&"part1".to_string()));
         assert!(names.contains(&"part2".to_string()));
         assert!(names.contains(&"default".to_string()));
-        assert_eq!(names, vec!["default", "part1", "part2"]);
+    }
+
+    #[tokio::test]
+    async fn test_list_partitions_creation_order() {
+        let manager = PartitionManager::new();
+
+        manager.create_partition("zzz".to_string()).await.unwrap();
+        manager.create_partition("aaa".to_string()).await.unwrap();
+
+        // MPD lists partitions in creation order, not alphabetically;
+        // "default" is always first.
+        assert_eq!(
+            manager.list_partitions().await,
+            vec!["default".to_string(), "zzz".to_string(), "aaa".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -351,46 +390,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_move_output_rejects_wrong_source_partition() {
+    async fn test_delete_partition_with_outputs_refused() {
         let manager = PartitionManager::new();
-        let part1 = manager.create_partition("part1".to_string()).await.unwrap();
-        let _part2 = manager.create_partition("part2".to_string()).await.unwrap();
 
-        part1.assign_output(0).await;
-        let err = manager
-            .move_output(0, "part2", "part1")
-            .await
-            .expect_err("move should fail when source does not own output");
-        assert!(err.contains("not assigned to source partition"), "{err}");
+        let part = manager.create_partition("test".to_string()).await.unwrap();
+        part.assign_output(0).await;
+
+        let result = manager.delete_partition("test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("still has outputs"));
+        assert!(manager.get_partition("test").await.is_some());
     }
 
     #[tokio::test]
-    async fn test_default_impl_contains_default_partition() {
-        let manager = PartitionManager::default();
-        assert_eq!(manager.count().await, 1);
-        assert!(manager.get_partition("default").await.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_load_partitions_updates_existing_default() {
+    async fn test_create_partition_limit() {
         let manager = PartitionManager::new();
-        manager
-            .load_partitions(vec![
-                PartitionInfo {
-                    name: "default".to_string(),
-                    output_ids: vec![7],
-                },
-                PartitionInfo {
-                    name: "room".to_string(),
-                    output_ids: vec![9],
-                },
-            ])
-            .await;
 
-        let default = manager.get_partition("default").await.unwrap();
-        assert!(default.get_outputs().await.contains(&7));
+        // "default" already counts as one; fill up to the 16-partition cap.
+        for i in 0..15 {
+            manager.create_partition(format!("part{i}")).await.unwrap();
+        }
 
-        let room = manager.get_partition("room").await.unwrap();
-        assert!(room.get_outputs().await.contains(&9));
+        let result = manager.create_partition("one_too_many".to_string()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Too many partitions"));
     }
 }

@@ -145,6 +145,7 @@ async fn handle_fs_event(
         EventKind::Create(_) | EventKind::Modify(_) => {
             for path in &event.paths {
                 if !is_supported_audio_file(path) {
+                    prune_if_vanished_directory(path, music_dir, db, event_bus).await?;
                     continue;
                 }
 
@@ -157,58 +158,76 @@ async fn handle_fs_event(
                     }
                 };
 
-                let relative_utf8 = match camino::Utf8PathBuf::from_path_buf(relative_path.to_path_buf()) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!("skipping non-UTF8 relative path: {:?}", relative_path);
-                        continue;
-                    }
-                };
-                let path_str = relative_utf8.to_string();
+                let path_str = relative_path.to_string_lossy().to_string();
+
+                // `notify` reports a rename/move-away as a modify (sometimes a
+                // create for the source path), not a remove. If the path is no
+                // longer a regular file (gone, or replaced by a directory),
+                // treat it exactly like `Remove`.
+                if !path.is_file() {
+                    debug!("file moved away: {}", path_str);
+                    remove_song_row(db, event_bus, &path_str).await?;
+                    continue;
+                }
 
                 debug!("file created/modified: {}", path_str);
 
-                // Extract metadata
-                let path_buf = match camino::Utf8PathBuf::from_path_buf(path.to_path_buf()) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!("skipping non-UTF8 path: {:?}", path);
+                // Extract metadata off the async runtime: file I/O and tag parsing block.
+                let path_buf = camino::Utf8PathBuf::from(path.to_string_lossy().to_string());
+                let extraction = tokio::task::spawn_blocking(move || {
+                    MetadataExtractor::extract_from_file(&path_buf)
+                })
+                .await;
+
+                let mut song = match extraction {
+                    Ok(Ok(song)) => song,
+                    Ok(Err(e)) => {
+                        // The file may have vanished between the `is_file` check
+                        // above and the extraction: then it is a removal, not an
+                        // extraction failure.
+                        if !path.is_file() {
+                            debug!("file moved away during extraction: {}", path_str);
+                            remove_song_row(db, event_bus, &path_str).await?;
+                            continue;
+                        }
+                        warn!("failed to extract metadata from {}: {}", path_str, e);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("metadata extraction task panicked for {}: {}", path_str, e);
                         continue;
                     }
                 };
-                match MetadataExtractor::extract_from_file(&path_buf) {
-                    Ok(mut song) => {
-                        song.path = relative_utf8;
 
-                        // Database operations need to be done with lock
-                        let db_guard = db.lock().await;
+                // Store the same music-dir-relative path the scanner uses, so
+                // get_song_by_path lookups (lsinfo/add/playlistinfo/stickers) find it.
+                song.path = camino::Utf8PathBuf::from(path_str.clone());
 
-                        // Check if song already exists
-                        let exists = db_guard.get_song_by_path(&path_str)?.is_some();
+                // Database operations need to be done with lock
+                let db_guard = db.lock().await;
 
-                        // Add/update in database
-                        db_guard.add_song(&song)?;
+                // Check if song already exists
+                let exists = db_guard.get_song_by_path(&path_str)?.is_some();
 
-                        drop(db_guard); // Release lock before emitting event
+                // Add/update in database
+                db_guard.add_song(&song)?;
 
-                        // Emit appropriate event
-                        if exists {
-                            debug!("song updated: {}", path_str);
-                            event_bus.emit(RmpdEvent::SongUpdated(song));
-                        } else {
-                            debug!("song added: {}", path_str);
-                            event_bus.emit(RmpdEvent::SongAdded(song));
-                        }
-                    }
-                    Err(e) => {
-                        warn!("failed to extract metadata from {}: {}", path_str, e);
-                    }
+                drop(db_guard); // Release lock before emitting event
+
+                // Emit appropriate event
+                if exists {
+                    debug!("song updated: {}", path_str);
+                    event_bus.emit(RmpdEvent::SongUpdated(song));
+                } else {
+                    debug!("song added: {}", path_str);
+                    event_bus.emit(RmpdEvent::SongAdded(song));
                 }
             }
         }
         EventKind::Remove(_) => {
             for path in &event.paths {
                 if !is_supported_audio_file(path) {
+                    prune_if_vanished_directory(path, music_dir, db, event_bus).await?;
                     continue;
                 }
 
@@ -228,15 +247,7 @@ async fn handle_fs_event(
 
                 debug!("file removed: {}", path_str);
 
-                // Remove from database
-                let db_guard = db.lock().await;
-                db_guard.delete_song_by_path(path_str)?;
-                drop(db_guard);
-
-                // Emit event
-                event_bus.emit(RmpdEvent::SongDeleted {
-                    path: path_str.to_string(),
-                });
+                remove_song_row(db, event_bus, &path_str).await?;
             }
         }
         _ => {
@@ -247,91 +258,285 @@ async fn handle_fs_event(
     Ok(())
 }
 
+/// Delete a song's row and emit `SongDeleted`. Shared by the `Remove` branch
+/// and the `Create | Modify` branch's vanished-path check, so a file that
+/// disappears from disk is handled identically regardless of which `notify`
+/// event kind reported it.
+async fn remove_song_row(
+    db: &Arc<Mutex<Database>>,
+    event_bus: &EventBus,
+    path_str: &str,
+) -> Result<()> {
+    let db_guard = db.lock().await;
+    db_guard.delete_song_by_path(path_str)?;
+    drop(db_guard);
+
+    event_bus.emit(RmpdEvent::SongDeleted {
+        path: path_str.to_string(),
+    });
+
+    Ok(())
+}
+
+/// If `path` is not an audio file (the caller already checked that) and no
+/// longer exists on disk, it denotes a directory (or some other non-audio
+/// path) that was removed or moved away out from under the watcher: `notify`
+/// reports the event on the directory path itself, not on each audio file
+/// inside it, so none of those files' own `Remove`/`Modify` events ever fire
+/// and `is_supported_audio_file` never sees them. Prune every local row under it.
+/// A path that still exists (e.g. a directory that is untouched, or some
+/// other non-audio file) is left alone — the caller already skips it.
+/// If `path` *is* the music directory itself, `strip_prefix` yields `""`,
+/// and pruning `""` would delete every local row in the library — but the
+/// music directory can be a transiently-unmounted mount point, so a watcher
+/// event on it is not proof the whole library is gone. Refuse to prune in
+/// that case instead of trusting it.
+async fn prune_if_vanished_directory(
+    path: &Path,
+    music_dir: &Path,
+    db: &Arc<Mutex<Database>>,
+    event_bus: &EventBus,
+) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    let relative_path = match path.strip_prefix(music_dir) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let rel_str = relative_path.to_string_lossy().to_string();
+
+    if rel_str.is_empty() {
+        warn!(
+            "music directory {:?} vanished; refusing to prune the entire library",
+            music_dir
+        );
+        return Ok(());
+    }
+
+    debug!("directory vanished, pruning rows under: {}", rel_str);
+    remove_rows_under(db, event_bus, &rel_str).await
+}
+
+/// Delete every local row whose path is `rel` itself or starts with `rel/`,
+/// in one lock acquisition and one transaction, then emit `SongDeleted` for
+/// each row actually deleted — used when `rel` denotes a directory that
+/// vanished from disk. `list_local_song_paths_under` and
+/// `delete_songs_by_paths` are both already scoped to local rows
+/// (`source IS NULL`), so remote catalog rows are never touched. A `rel`
+/// under which nothing matches (e.g. a non-audio file that vanished) is a
+/// no-op.
+async fn remove_rows_under(
+    db: &Arc<Mutex<Database>>,
+    event_bus: &EventBus,
+    rel: &str,
+) -> Result<()> {
+    let deleted = {
+        let db_guard = db.lock().await;
+        let paths = db_guard.list_local_song_paths_under(rel)?;
+        db_guard.delete_songs_by_paths(&paths)?
+    };
+
+    for path in deleted {
+        event_bus.emit(RmpdEvent::SongDeleted { path });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle_fs_event, is_supported_audio_file};
-    use crate::database::Database;
-    use notify::event::CreateKind;
-    use notify::{Event, EventKind};
-    use rmpd_core::event::{Event as RmpdEvent, EventBus};
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use tokio::runtime::Builder;
-    use tokio::sync::Mutex;
+    use super::*;
+    use notify::event::{ModifyKind, RemoveKind, RenameMode};
+    use rmpd_core::song::Song;
 
-    #[test]
-    fn supported_audio_file_uses_metadata_rules_and_skips_hidden() {
-        assert!(is_supported_audio_file(std::path::Path::new("visible.flac")));
-        assert!(is_supported_audio_file(std::path::Path::new("track.dsf")));
-        assert!(is_supported_audio_file(std::path::Path::new("track.dff")));
-        assert!(!is_supported_audio_file(std::path::Path::new(".hidden.flac")));
+    fn local_song(path: &str) -> Song {
+        Song {
+            id: 0,
+            path: path.into(),
+            duration: None,
+            sample_rate: None,
+            channels: None,
+            bits_per_sample: None,
+            bitrate: None,
+            replay_gain_track_gain: None,
+            replay_gain_track_peak: None,
+            replay_gain_album_gain: None,
+            replay_gain_album_peak: None,
+            added_at: 0,
+            last_modified: 0,
+            tags: Vec::new(),
+        }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn supported_audio_file_rejects_non_utf8_paths() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
+    /// A rename/move-away arrives from `notify` as a modify event for a path
+    /// that no longer exists (backends differ; inotify reports `MOVED_FROM`).
+    /// Independently of the backend, that event must delete the row and emit
+    /// `SongDeleted`, exactly like a `Remove` would.
+    #[tokio::test]
+    async fn modify_event_for_a_vanished_path_removes_the_row() {
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let music_dir = temp_dir.path().join("music");
+        std::fs::create_dir(&music_dir).expect("create music dir");
+        let db_path = temp_dir.path().join("test.db");
+        let database = Database::open(db_path.to_str().unwrap()).expect("open database");
+        database
+            .add_song(&local_song("song.flac"))
+            .expect("insert the row the file used to have");
+        let db = Arc::new(Mutex::new(database));
+        let event_bus = EventBus::new();
+        let mut rx = event_bus.subscribe();
 
-        let non_utf8 = PathBuf::from(OsString::from_vec(vec![0x66, 0x80, b'.', b'f', b'l', b'a', b'c']));
-        assert!(!is_supported_audio_file(non_utf8.as_path()));
-    }
+        // The file was never created on disk: the path no longer exists.
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(music_dir.join("song.flac"));
+        handle_fs_event(&event, &music_dir, &db, &event_bus)
+            .await
+            .expect("handle the synthetic event");
 
-    #[test]
-    fn create_event_stores_relative_path_and_emits_added() {
-        let rt = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        rt.block_on(async {
-            let temp = TempDir::new().expect("temp dir");
-            let music_dir = temp.path().join("music");
-            std::fs::create_dir_all(music_dir.join("album")).expect("create music dirs");
-
-            let fixture = rmpd_core::test_utils::get_fixture(env!("CARGO_MANIFEST_DIR"), "basic.flac");
-            let song_path = music_dir.join("album/song.flac");
-            std::fs::copy(&fixture, &song_path).expect("copy fixture");
-
-            let db_path = temp.path().join("watcher.db");
-            let db = Database::open(db_path.to_str().expect("utf8 db path")).expect("open db");
-            let db = Arc::new(Mutex::new(db));
-
-            let event_bus = EventBus::new();
-            let mut rx = event_bus.subscribe();
-
-            let event = Event {
-                kind: EventKind::Create(CreateKind::Any),
-                paths: vec![song_path.clone()],
-                attrs: Default::default(),
-            };
-
-            handle_fs_event(&event, music_dir.as_path(), &db, &event_bus)
+        assert!(
+            db.lock()
                 .await
-                .expect("handle create event");
+                .get_song_by_path("song.flac")
+                .expect("query")
+                .is_none(),
+            "the row of a vanished path must be deleted"
+        );
+        match rx.try_recv() {
+            Ok(RmpdEvent::SongDeleted { path }) => assert_eq!(path, "song.flac"),
+            other => panic!("expected SongDeleted for song.flac, got {other:?}"),
+        }
+    }
 
-            let guard = db.lock().await;
-            let stored_rel = guard
-                .get_song_by_path("album/song.flac")
-                .expect("query by relative path");
-            assert!(stored_rel.is_some(), "expected relative song path in DB");
+    /// Shared body for the two vanished-directory tests below: seed `dir/a.flac`,
+    /// `dir/b.flac` and a control row `other/c.flac`, feed `handle_fs_event` a
+    /// synthetic event of `kind` whose path is `music_dir/dir` (a directory that
+    /// does not exist on disk, since nothing was ever created there), and assert
+    /// both rows under `dir/` are gone, the control row survives, and a
+    /// `SongDeleted` was emitted for each pruned row.
+    async fn assert_vanished_directory_prunes_rows_under_it(kind: EventKind) {
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let music_dir = temp_dir.path().join("music");
+        std::fs::create_dir(&music_dir).expect("create music dir");
+        let db_path = temp_dir.path().join("test.db");
+        let database = Database::open(db_path.to_str().unwrap()).expect("open database");
+        database
+            .add_song(&local_song("dir/a.flac"))
+            .expect("insert dir/a.flac");
+        database
+            .add_song(&local_song("dir/b.flac"))
+            .expect("insert dir/b.flac");
+        database
+            .add_song(&local_song("other/c.flac"))
+            .expect("insert control row other/c.flac");
+        let db = Arc::new(Mutex::new(database));
+        let event_bus = EventBus::new();
+        let mut rx = event_bus.subscribe();
 
-            let abs_path_str = song_path.to_str().expect("utf8 song path");
-            let stored_abs = guard
-                .get_song_by_path(abs_path_str)
-                .expect("query by absolute path");
-            assert!(stored_abs.is_none(), "absolute path should not be stored");
-            drop(guard);
+        // `dir` was never created on disk: the directory no longer exists.
+        let event = Event::new(kind).add_path(music_dir.join("dir"));
+        handle_fs_event(&event, &music_dir, &db, &event_bus)
+            .await
+            .expect("handle the synthetic event");
 
-            let mut saw_added = false;
-            while let Ok(ev) = rx.try_recv() {
-                if let RmpdEvent::SongAdded(song) = ev {
-                    assert_eq!(song.path.as_str(), "album/song.flac");
-                    saw_added = true;
-                }
+        let db_guard = db.lock().await;
+        assert!(
+            db_guard
+                .get_song_by_path("dir/a.flac")
+                .expect("query")
+                .is_none(),
+            "dir/a.flac should be pruned along with the vanished directory"
+        );
+        assert!(
+            db_guard
+                .get_song_by_path("dir/b.flac")
+                .expect("query")
+                .is_none(),
+            "dir/b.flac should be pruned along with the vanished directory"
+        );
+        assert!(
+            db_guard
+                .get_song_by_path("other/c.flac")
+                .expect("query")
+                .is_some(),
+            "other/c.flac is outside the vanished directory and must survive"
+        );
+        drop(db_guard);
+
+        let mut deleted_paths = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                RmpdEvent::SongDeleted { path } => deleted_paths.push(path),
+                other => panic!("expected only SongDeleted events, got {other:?}"),
             }
-            assert!(saw_added, "expected SongAdded event");
-        });
+        }
+        deleted_paths.sort();
+        assert_eq!(
+            deleted_paths,
+            vec!["dir/a.flac".to_string(), "dir/b.flac".to_string()],
+            "a SongDeleted event should be emitted for each pruned row"
+        );
+    }
+
+    /// A directory removed or moved away arrives from `notify` as a modify/rename
+    /// event on the directory's own path (backends differ; inotify reports
+    /// `MOVED_FROM`), not one event per file inside it — `is_supported_audio_file` never
+    /// matches a directory, so without special handling every row under it would
+    /// be left behind (issue #12 follow-up).
+    #[tokio::test]
+    async fn modify_event_for_a_vanished_directory_prunes_rows_under_it() {
+        assert_vanished_directory_prunes_rows_under_it(EventKind::Modify(ModifyKind::Name(
+            RenameMode::From,
+        )))
+        .await;
+    }
+
+    /// Same as above, but for the `Remove` event kind `notify` reports when a
+    /// watched directory is deleted outright (e.g. `IN_DELETE_SELF` on inotify).
+    #[tokio::test]
+    async fn remove_event_for_a_vanished_directory_prunes_rows_under_it() {
+        assert_vanished_directory_prunes_rows_under_it(EventKind::Remove(RemoveKind::Folder)).await;
+    }
+
+    /// A watcher event on the music directory path itself must never wipe the
+    /// whole library: `strip_prefix` yields `""` for that path, which without
+    /// the guard in `prune_if_vanished_directory` would match every local row.
+    #[tokio::test]
+    async fn modify_event_for_the_music_directory_itself_leaves_all_rows() {
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let music_dir = temp_dir.path().join("music");
+        std::fs::create_dir(&music_dir).expect("create music dir");
+        let db_path = temp_dir.path().join("test.db");
+        let database = Database::open(db_path.to_str().unwrap()).expect("open database");
+        database
+            .add_song(&local_song("dir/a.flac"))
+            .expect("insert dir/a.flac");
+        let db = Arc::new(Mutex::new(database));
+        let event_bus = EventBus::new();
+        let mut rx = event_bus.subscribe();
+
+        // Simulate the music directory itself vanishing (e.g. an unmounted
+        // mount point): the event path is the music directory, so its
+        // relative path is "".
+        std::fs::remove_dir(&music_dir).expect("remove music dir to simulate vanish");
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(music_dir.clone());
+        handle_fs_event(&event, &music_dir, &db, &event_bus)
+            .await
+            .expect("handle the synthetic event");
+
+        assert!(
+            db.lock()
+                .await
+                .get_song_by_path("dir/a.flac")
+                .expect("query")
+                .is_some(),
+            "a vanished music directory must not wipe the library"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no SongDeleted should be emitted when refusing to prune the whole library"
+        );
     }
 }

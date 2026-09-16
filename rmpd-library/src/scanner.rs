@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use rmpd_core::error::{Result, RmpdError};
 use rmpd_core::event::{Event, EventBus};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -31,6 +32,7 @@ pub struct Scanner {
     event_bus: EventBus,
     music_directory: Option<Utf8PathBuf>,
     follow_symlinks: bool,
+    force_rescan: bool,
 }
 
 impl Scanner {
@@ -39,6 +41,7 @@ impl Scanner {
             event_bus,
             music_directory: None,
             follow_symlinks,
+            force_rescan: false,
         }
     }
 
@@ -51,6 +54,20 @@ impl Scanner {
             event_bus: self.event_bus.clone(),
             music_directory: Some(dir),
             follow_symlinks: self.follow_symlinks,
+            force_rescan: self.force_rescan,
+        }
+    }
+
+    /// When `true`, re-reads tags for every file even if its on-disk mtime
+    /// hasn't advanced past the database's recorded `last_modified` —
+    /// matches MPD's `rescan` command (`update` only re-reads modified
+    /// files, `rescan` also rescans unmodified ones).
+    pub fn with_force_rescan(&self, force: bool) -> Self {
+        Self {
+            event_bus: self.event_bus.clone(),
+            music_directory: self.music_directory.clone(),
+            follow_symlinks: self.follow_symlinks,
+            force_rescan: force,
         }
     }
 
@@ -62,24 +79,152 @@ impl Scanner {
             let mut stats = ScanStats::default();
 
             // Build a scanner variant that knows the music directory so that make_relative_path
-            // can strip the root prefix from absolute paths during the scan.
-            let music_dir = Utf8PathBuf::try_from(root_path.to_path_buf()).map_err(|_| {
-                RmpdError::Library("Music directory path is not valid UTF-8".into())
-            })?;
-            let scanner_with_dir = self.with_music_dir(music_dir);
+            // can strip the root prefix from absolute paths during the scan. If `self` already
+            // has one configured (a scan of one of its own subtrees), keep it — `root_path` is
+            // then a subtree root, not the library root, and prune_missing/file_is_present need
+            // the real root to resolve database-relative paths back to disk.
+            let utf8_root = Utf8PathBuf::try_from(root_path.to_path_buf())
+                .map_err(|_| RmpdError::Library("Music directory path is not valid UTF-8".into()))?;
+            let scanner_with_dir = self.with_music_dir(
+                self.music_directory
+                    .clone()
+                    .unwrap_or_else(|| utf8_root.clone()),
+            );
 
             scanner_with_dir.scan_recursive(db, root_path, &mut stats)?;
 
+            let prefix = scanner_with_dir.make_relative_path(&utf8_root)?;
+            scanner_with_dir.prune_missing(db, prefix.as_str(), &mut stats);
+            scanner_with_dir.prune_empty_directories(db, &mut stats);
+
             info!(
-                "scan complete: {} files scanned, {} added, {} updated, {} errors",
-                stats.scanned, stats.added, stats.updated, stats.errors
+                "scan complete: {} files scanned, {} added, {} updated, {} removed, {} errors",
+                stats.scanned, stats.added, stats.updated, stats.removed, stats.errors
             );
 
             Ok(stats)
         })();
 
         self.event_bus.emit(Event::DatabaseUpdateFinished);
+
         result
+    }
+
+    /// Delete local song rows at or under `prefix` whose file is no longer present on disk.
+    ///
+    /// `prefix` is the scanned subtree's database-relative path (`""` for a whole-library
+    /// scan, which is what every caller passes today), computed by `scan_directory` from the
+    /// scanner's `music_directory` and the scan root — so a scan rooted at a subdirectory only
+    /// ever considers rows under that subdirectory, never every row outside it.
+    /// `Database::list_local_song_paths_under` is already scoped to `source IS NULL`, so remote
+    /// catalog rows from `add_source_song` are never candidates. A row is missing when
+    /// `music_directory.join(path)` does not resolve to an existing regular file; a symlink
+    /// counts as present only when the scanner follows symlinks, mirroring the walk in
+    /// `collect_audio_files` (a row for a symlinked file is pruned by a scan configured not to
+    /// follow them, as MPD does). Vanished rows are all deleted in a single transaction.
+    fn prune_missing(&self, db: &Database, prefix: &str, stats: &mut ScanStats) {
+        let music_dir = self
+            .music_directory
+            .as_ref()
+            .expect("prune_missing is only called on a scanner with music_directory set");
+
+        let paths = match db.list_local_song_paths_under(prefix) {
+            Ok(paths) => paths,
+            Err(e) => {
+                warn!("failed to list local songs for prune: {}", e);
+                stats.errors += 1;
+                return;
+            }
+        };
+
+        let missing: Vec<String> = paths
+            .into_iter()
+            .filter(|path| !self.file_is_present(music_dir.join(path).as_std_path()))
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        match db.delete_songs_by_paths(&missing) {
+            Ok(deleted) => {
+                stats.removed += deleted.len() as u32;
+                for path in deleted {
+                    debug!("pruned missing song: {}", path);
+                    self.event_bus.emit(Event::SongDeleted { path });
+                }
+            }
+            Err(e) => {
+                warn!("failed to prune missing songs: {}", e);
+                stats.errors += 1;
+            }
+        }
+    }
+
+    /// Delete directory rows that hold no songs and no child directories once their on-disk
+    /// location is gone (e.g. `prune_missing` above just emptied it, or the whole directory was
+    /// removed directly). Re-lists `Database::list_empty_directory_paths` after every pass:
+    /// deleting a leaf can make its now-childless parent qualify on the next pass, so a vanished
+    /// subtree collapses bottom-up within this one call. A row for a directory still present on
+    /// disk is always kept even if empty, and a remote mount point's row is never a candidate —
+    /// it holds remote songs, so it is never reported as empty.
+    fn prune_empty_directories(&self, db: &Database, stats: &mut ScanStats) {
+        let music_dir = self
+            .music_directory
+            .as_ref()
+            .expect("prune_empty_directories is only called on a scanner with music_directory set");
+
+        loop {
+            let candidates = match db.list_empty_directory_paths() {
+                Ok(paths) => paths,
+                Err(e) => {
+                    warn!("failed to list empty directories for prune: {}", e);
+                    stats.errors += 1;
+                    return;
+                }
+            };
+
+            let mut pruned = 0u32;
+            for path in candidates {
+                if self.dir_is_present(music_dir.join(&path).as_std_path()) {
+                    continue;
+                }
+
+                match db.delete_directory_by_path(&path) {
+                    Ok(()) => {
+                        pruned += 1;
+                        debug!("pruned missing directory: {}", path);
+                    }
+                    Err(e) => {
+                        warn!("failed to prune missing directory {}: {}", path, e);
+                        stats.errors += 1;
+                    }
+                }
+            }
+
+            if pruned == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Whether `path` is excluded because it's a symlink and the scan doesn't follow them,
+    /// mirroring the entry-skip in `collect_audio_files`.
+    fn is_symlink_excluded(&self, path: &Path) -> bool {
+        !self.follow_symlinks
+            && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    /// Whether `path` is a regular file the scan would have visited: symlinks
+    /// only count when `follow_symlinks` is set, like `collect_audio_files`.
+    fn file_is_present(&self, path: &Path) -> bool {
+        !self.is_symlink_excluded(path) && path.is_file()
+    }
+
+    /// Whether `path` is a directory the scan would have visited: symlinks
+    /// only count when `follow_symlinks` is set, like `collect_audio_files`.
+    fn dir_is_present(&self, path: &Path) -> bool {
+        !self.is_symlink_excluded(path) && path.is_dir()
     }
 
     /// Convert absolute path to relative path (relative to music_directory)
@@ -105,9 +250,18 @@ impl Scanner {
         // or an equivalent query with a `WHERE source IS NULL` predicate to avoid
         // evicting remote catalog rows inserted by `Database::add_source_song`.
 
-        // Step 1: Collect all audio files and their metadata (sequential directory walk)
+        // Step 1: Collect all audio files and their metadata (sequential directory walk).
+        // `visited_dirs` tracks (dev, ino) pairs already recursed into, shared across the
+        // whole tree walk, so a symlink cycle (or any other filesystem loop) can't cause
+        // unbounded recursion when `follow_symlinks` is enabled.
         let mut files_to_process = Vec::new();
-        self.collect_audio_files(db, path, &mut files_to_process, stats)?;
+        let mut visited_dirs = std::collections::HashSet::new();
+        // Seed with the root itself so a symlink cycle that loops back to the
+        // scan root (rather than to some deeper ancestor) is also detected.
+        if let Ok(root_meta) = fs::metadata(path) {
+            visited_dirs.insert((root_meta.dev(), root_meta.ino()));
+        }
+        self.collect_audio_files(db, path, &mut files_to_process, stats, &mut visited_dirs)?;
 
         // Step 2: Extract metadata in parallel
         let extracted: Vec<ExtractedMetadata> = files_to_process
@@ -184,6 +338,7 @@ impl Scanner {
         path: &Path,
         files: &mut Vec<FileInfo>,
         stats: &mut ScanStats,
+        visited_dirs: &mut std::collections::HashSet<(u64, u64)>,
     ) -> Result<()> {
         let entries = fs::read_dir(path)
             .map_err(|e| RmpdError::Library(format!("Failed to read directory: {e}")))?;
@@ -221,7 +376,16 @@ impl Scanner {
                 }
             }
 
-            let metadata = match entry.metadata() {
+            // `entry.metadata()` never traverses a symlink (it's equivalent to `lstat`), so
+            // a symlinked directory/file would otherwise be silently ignored even with
+            // `follow_symlinks` enabled. Use `fs::metadata` (which follows symlinks, i.e.
+            // `stat`) in that case so `is_dir()`/`is_file()` reflect the link's target.
+            let metadata = if self.follow_symlinks {
+                fs::metadata(&entry_path)
+            } else {
+                entry.metadata()
+            };
+            let metadata = match metadata {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("failed to read metadata for {:?}: {}", entry_path, e);
@@ -231,6 +395,19 @@ impl Scanner {
             };
 
             if metadata.is_dir() {
+                // Cycle guard: skip directories we've already recursed into (identified by
+                // (dev, ino)). This catches symlink cycles (an ancestor pointing at itself
+                // or a descendant) as well as any other hard/soft-link loop, regardless of
+                // whether `follow_symlinks` is enabled.
+                let dir_key = (metadata.dev(), metadata.ino());
+                if !visited_dirs.insert(dir_key) {
+                    warn!(
+                        "skipping already-visited directory (symlink cycle?): {:?}",
+                        entry_path
+                    );
+                    continue;
+                }
+
                 // Record directory with its filesystem mtime before recursing
                 if let Ok(utf8_dir) = Utf8PathBuf::try_from(entry_path.clone())
                     && let Ok(rel_dir) = self.make_relative_path(&utf8_dir)
@@ -247,7 +424,9 @@ impl Scanner {
                     }
                 }
                 // Recurse into subdirectory
-                if let Err(e) = self.collect_audio_files(db, &entry_path, files, stats) {
+                if let Err(e) =
+                    self.collect_audio_files(db, &entry_path, files, stats, visited_dirs)
+                {
                     warn!("failed to scan directory {:?}: {}", entry_path, e);
                     stats.errors += 1;
                 }
@@ -303,8 +482,9 @@ impl Scanner {
                         .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                 );
 
-                // Skip if file hasn't been modified
-                if let Some(ref existing) = existing_song
+                // Skip if file hasn't been modified (unless a forced rescan)
+                if !self.force_rescan
+                    && let Some(existing) = &existing_song
                     && existing.last_modified >= mtime
                 {
                     continue;
@@ -328,6 +508,7 @@ pub struct ScanStats {
     pub scanned: u32,
     pub added: u32,
     pub updated: u32,
+    pub removed: u32,
     pub errors: u32,
 }
 

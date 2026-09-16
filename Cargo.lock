@@ -288,26 +288,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "audio-core"
-version = "0.2.1"
+name = "audio-codec-algorithms"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f93ebbf82d06013f4c41fe71303feb980cddd78496d904d06be627972de51a24"
+checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
 
 [[package]]
 name = "audioadapter"
-version = "3.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91f87b70b051c5866680ad79f6743a42ccab264c009d1a71f4d33a3872ae60c8"
-dependencies = [
- "audio-core",
- "num-traits",
-]
+checksum = "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4"
 
 [[package]]
 name = "audioadapter-buffers"
-version = "3.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9097d67933fb083d382ce980430afdb758aada60846010aee6be068c06cef0ca"
+checksum = "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce"
 dependencies = [
  "audioadapter",
  "audioadapter-sample",
@@ -316,11 +312,11 @@ dependencies = [
 
 [[package]]
 name = "audioadapter-sample"
-version = "3.0.0"
+version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ab94f2bc04a14e1f49ee5f222f66460e8a1b51627bdfedf34eed394d747938"
+checksum = "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d"
 dependencies = [
- "audio-core",
+ "audio-codec-algorithms",
  "num-traits",
 ]
 
@@ -681,15 +677,6 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
-name = "convert_case"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baaaa0ecca5b51987b9423ccdc971514dd8b0bb7b4060b983d3664dad3f1f89f"
-dependencies = [
- "unicode-segmentation",
-]
 
 [[package]]
 name = "cookie-factory"
@@ -1386,14 +1373,17 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash",
+]
 
 [[package]]
 name = "hashlink"
-version = "0.11.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1974,26 +1964,25 @@ dependencies = [
 
 [[package]]
 name = "libspa"
-version = "0.9.2"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b8cfa2a7656627b4c92c6b9ef929433acd673d5ab3708cda1b18478ac00df4"
+checksum = "882f7427e7989dcc9d388b7f05c4630390a1d7696f9ffa469cd4a7a48f0b4c40"
 dependencies = [
  "bitflags 2.13.2",
  "cc",
- "convert_case",
  "cookie-factory",
  "libc",
  "libspa-sys",
- "nix 0.30.1",
  "nom 8.0.0",
+ "rustix",
  "system-deps",
 ]
 
 [[package]]
 name = "libspa-sys"
-version = "0.9.2"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "901049455d2eb6decf9058235d745237952f4804bc584c5fcb41412e6adcc6e0"
+checksum = "3b6e17bdaf63ed0d5e4144022624032b41fd9733112e8c74ac26fc9bf1291924"
 dependencies = [
  "bindgen",
  "cc",
@@ -2002,9 +1991,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2034,8 +2023,8 @@ dependencies = [
 
 [[package]]
 name = "lofty"
-version = "0.24.0"
-source = "git+https://github.com/M0Rf30/lofty-rs?rev=bd7defe1d4f0408958787e4aa799dca11a71b90a#bd7defe1d4f0408958787e4aa799dca11a71b90a"
+version = "0.25.1"
+source = "git+https://github.com/M0Rf30/lofty-rs?rev=b0064904dbd09f61fd76c46ba48d5d4393b87bf7#b0064904dbd09f61fd76c46ba48d5d4393b87bf7"
 dependencies = [
  "byteorder",
  "data-encoding",
@@ -2048,12 +2037,12 @@ dependencies = [
 
 [[package]]
 name = "lofty_attr"
-version = "0.12.0"
-source = "git+https://github.com/M0Rf30/lofty-rs?rev=bd7defe1d4f0408958787e4aa799dca11a71b90a#bd7defe1d4f0408958787e4aa799dca11a71b90a"
+version = "0.13.0"
+source = "git+https://github.com/M0Rf30/lofty-rs?rev=b0064904dbd09f61fd76c46ba48d5d4393b87bf7#b0064904dbd09f61fd76c46ba48d5d4393b87bf7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -2110,9 +2099,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd"
-version = "0.20.3"
+version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86dbb9f00c8c367f75ed3a775d3eb31d0375a72f58275ef64a1bc53c255a2ce2"
+checksum = "a63c9b854b5ad0812ac5969f8db92a59f28b45d0a5ae599b9a45b84c5c8a08e8"
 dependencies = [
  "fastrand",
  "flume",
@@ -2263,18 +2252,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
-]
-
-[[package]]
-name = "nix"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
-dependencies = [
- "bitflags 2.13.2",
- "cfg-if",
- "cfg_aliases",
- "libc",
 ]
 
 [[package]]
@@ -2516,7 +2493,7 @@ dependencies = [
 [[package]]
 name = "ogg_pager"
 version = "0.7.2"
-source = "git+https://github.com/M0Rf30/lofty-rs?rev=bd7defe1d4f0408958787e4aa799dca11a71b90a#bd7defe1d4f0408958787e4aa799dca11a71b90a"
+source = "git+https://github.com/M0Rf30/lofty-rs?rev=b0064904dbd09f61fd76c46ba48d5d4393b87bf7#b0064904dbd09f61fd76c46ba48d5d4393b87bf7"
 dependencies = [
  "byteorder",
 ]
@@ -2656,26 +2633,23 @@ dependencies = [
 
 [[package]]
 name = "pipewire"
-version = "0.9.2"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9688b89abf11d756499f7c6190711d6dbe5a3acdb30c8fbf001d6596d06a8d44"
+checksum = "bde71084c4e25959d68f1ea54daa75e5ecdb338e5caf0b5510143b79baa32d5c"
 dependencies = [
- "anyhow",
  "bitflags 2.13.2",
  "libc",
  "libspa",
  "libspa-sys",
- "nix 0.30.1",
- "once_cell",
  "pipewire-sys",
- "thiserror 2.0.20",
+ "rustix",
 ]
 
 [[package]]
 name = "pipewire-sys"
-version = "0.9.2"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb028afee0d6ca17020b090e3b8fa2d7de23305aef975c7e5192a5050246ea36"
+checksum = "9ce653f53e63e5b93853218092ee9a8906a5d082c92f3f1db26316955dd63ce0"
 dependencies = [
  "bindgen",
  "libspa-sys",
@@ -3052,11 +3026,11 @@ dependencies = [
 
 [[package]]
 name = "rmpd"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
- "nix 0.31.3",
+ "nix",
  "rmpd-core",
  "rmpd-library",
  "rmpd-player",
@@ -3070,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-core"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "camino",
  "cpal",
@@ -3091,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-library"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.23.1",
  "camino",
@@ -3116,16 +3090,16 @@ dependencies = [
 
 [[package]]
 name = "rmpd-macros"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
  "trybuild",
 ]
 
 [[package]]
 name = "rmpd-player"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "approx",
  "audioadapter-buffers",
@@ -3144,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-plugin"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "rmpd-core",
@@ -3152,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-protocol"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3160,6 +3134,7 @@ dependencies = [
  "mdns-sd",
  "mpris-server",
  "rand 0.10.2",
+ "regex",
  "rmpd-core",
  "rmpd-library",
  "rmpd-macros",
@@ -3174,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-source"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "camino",
@@ -3192,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "rmpd-stream"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "parking_lot",
  "reqwest",
@@ -3212,9 +3187,9 @@ dependencies = [
 
 [[package]]
 name = "rubato"
-version = "3.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4be9c88e3d722d3d36939e41941f6b6f52810c1235bf19998a7d4535b402892"
+checksum = "a7cb1ffaf8738df50aab642a7f6465df81c6ba9e2818268053487165298114be"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -3228,9 +3203,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.39.0"
+version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -3643,8 +3618,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "symphonia"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
@@ -3667,8 +3642,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-bundle-flac"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3678,8 +3653,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-bundle-mp3"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "lazy_static",
  "log",
@@ -3688,8 +3663,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-aac"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "lazy_static",
  "log",
@@ -3699,8 +3674,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-adpcm"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3708,8 +3683,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-alac"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3718,8 +3693,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-dsd"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3727,8 +3702,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-pcm"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3736,8 +3711,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-vorbis"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3746,8 +3721,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-common"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3756,8 +3731,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-core"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -3770,8 +3745,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-caf"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3780,8 +3755,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-dsd"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3790,8 +3765,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-isomp4"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3801,8 +3776,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-mkv"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "lazy_static",
  "log",
@@ -3812,8 +3787,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-ogg"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "log",
  "symphonia-common",
@@ -3823,8 +3798,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-format-riff"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "extended",
  "log",
@@ -3834,8 +3809,8 @@ dependencies = [
 
 [[package]]
 name = "symphonia-metadata"
-version = "0.6.0"
-source = "git+https://github.com/M0Rf30/Symphonia?rev=e0649c9c77e6104a03ac99ce4600fef420b62478#e0649c9c77e6104a03ac99ce4600fef420b62478"
+version = "0.5.9"
+source = "git+https://github.com/M0Rf30/Symphonia?rev=84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2#84c21b7d2b563326c9f1bbf4a35f1ac1d80675c2"
 dependencies = [
  "lazy_static",
  "log",
@@ -3877,13 +3852,13 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -4515,12 +4490,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
-name = "unicode-segmentation"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
-
-[[package]]
 name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5112,13 +5081,13 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
+checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
  "synstructure",
 ]
 
@@ -5224,13 +5193,13 @@ dependencies = [
 
 [[package]]
 name = "zerofrom-derive"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
+checksum = "f75b4683f6c7f45248d4d64056a24298c6281e0993356d7d1b4a1a962ef10d4a"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
  "synstructure",
 ]
 

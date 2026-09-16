@@ -1,0 +1,5 @@
+error: duplicate `permission` key in `command` attribute
+ --> tests/ui/compile_fail/duplicate_permission_key.rs:5:46
+  |
+5 |     #[command(name = "play", permission = 1, permission = 2)]
+  |                                              ^^^^^^^^^^

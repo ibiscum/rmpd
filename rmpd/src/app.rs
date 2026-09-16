@@ -77,18 +77,31 @@ pub async fn run(bind_address: String, config: Config) -> Result<()> {
         .set_outputs_from_config(&config.output, &config.audio.default_output)
         .await;
 
-    // Load state from file if it exists
+    // Load state from file if it exists. A failure here (corrupt file, or
+    // the blocking load task itself panicking) must not prevent the daemon
+    // from starting; it just means playback state is not restored. The three
+    // outcomes are handled separately so a panicking load can never
+    // masquerade as "no saved state was present".
     let state_file = StateFile::new(state_file_path.clone());
-    if let Ok(Some(saved_state)) = state_file.load() {
-        info!("restoring state from file");
-        restore_state(
-            &state,
-            saved_state,
-            &db_path,
-            &music_dir,
-            config.audio.restore_paused,
-        )
-        .await;
+    match tokio::task::spawn_blocking(move || state_file.load()).await {
+        Ok(Ok(Some(saved_state))) => {
+            info!("restoring state from file");
+            restore_state(
+                &state,
+                saved_state,
+                &db_path,
+                &music_dir,
+                config.audio.restore_paused,
+            )
+            .await;
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => {
+            error!("failed to load state file: {}", e);
+        }
+        Err(e) => {
+            error!("state restoration skipped: load task failed: {}", e);
+        }
     }
 
     // Create shutdown channel
@@ -120,10 +133,20 @@ pub async fn run(bind_address: String, config: Config) -> Result<()> {
         None
     };
 
+    // A missing music_directory is not fatal (config warns about it), but the
+    // scanner and the watcher both need a real directory. Skipping them here is
+    // what makes that warning honest: without this the daemon would immediately
+    // log a scan failure and a watch failure for a path we already reported.
+    let music_dir_exists = std::path::Path::new(&music_dir).is_dir();
+
     // Trigger an initial library scan on startup when auto-update is enabled.
     if config.database.auto_update {
-        info!("auto-update enabled: scanning music directory");
-        state.spawn_library_update();
+        if music_dir_exists {
+            info!("auto-update enabled: scanning music directory");
+            state.spawn_library_update(false).await;
+        } else {
+            warn!("skipping library scan: music directory {music_dir} does not exist");
+        }
     }
 
     // Sync enabled music sources (ping first; unreachable sources are skipped).
@@ -135,7 +158,7 @@ pub async fn run(bind_address: String, config: Config) -> Result<()> {
     // Start the filesystem watcher so the database stays in sync with on-disk
     // changes. Kept alive (`_watcher`) for the lifetime of the server; dropping
     // it would stop watching.
-    let _watcher = if config.database.filesystem_watch {
+    let _watcher = if config.database.filesystem_watch && music_dir_exists {
         match start_filesystem_watch(&state, &db_path, &music_dir).await {
             Ok(w) => Some(w),
             Err(e) => {
@@ -170,6 +193,11 @@ pub async fn run(bind_address: String, config: Config) -> Result<()> {
     let server = MpdServer::with_state(bind_address, state.clone(), shutdown_rx);
     let server =
         server.with_unix_socket(config.network.unix_socket.as_ref().map(|p| p.to_string()));
+    let server = server
+        .with_max_connections(config.network.max_connections)
+        .with_connection_timeout(std::time::Duration::from_secs(
+            config.network.connection_timeout,
+        ));
 
     if let Some(ref sock) = config.network.unix_socket {
         info!("unix socket: {}", sock);
@@ -258,6 +286,17 @@ async fn restore_state(
         if !enabled.is_empty() {
             state.engine.write().await.set_outputs(enabled);
         }
+    }
+
+    // Restore the last-loaded-playlist name unconditionally (mirrors MPD's
+    // PlaylistState.cxx, which sets it directly from the state file and
+    // doesn't depend on whether any songs are also being restored).
+    if !saved_state.last_loaded_playlist.is_empty() {
+        state
+            .queue
+            .write()
+            .await
+            .set_last_loaded_playlist(saved_state.last_loaded_playlist.clone());
     }
 
     // Restore playlist

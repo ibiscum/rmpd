@@ -12,9 +12,9 @@
 //! audible band — while the `Linear` mode uses cheap polynomial interpolation
 //! with no anti-aliasing.
 
-use audioadapter_buffers::direct::InterleavedSlice;
 use rmpd_core::config::ResamplerQuality;
 use rubato::{
+    audioadapter_buffers::direct::InterleavedSlice,
     Async, FixedAsync, Indexing, PolynomialDegree, Resampler, SincInterpolationParameters,
     SincInterpolationType, WindowFunction, calculate_cutoff,
 };
@@ -170,7 +170,7 @@ fn sinc_params(quality: ResamplerQuality) -> SincInterpolationParameters {
     };
     SincInterpolationParameters {
         sinc_len,
-        f_cutoff: calculate_cutoff(sinc_len, window),
+        f_cutoff: Some(calculate_cutoff(sinc_len, window)),
         interpolation,
         oversampling_factor,
         window,

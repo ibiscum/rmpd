@@ -24,6 +24,7 @@ use syn::{Data, DeriveInput, Fields, Lit, parse_macro_input};
 pub fn derive_command_metadata(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let variants = match &input.data {
         Data::Enum(data) => &data.variants,
@@ -45,6 +46,8 @@ pub fn derive_command_metadata(input: TokenStream) -> TokenStream {
 
         let mut cmd_name: Option<String> = None;
         let mut cmd_perm: u8 = 0;
+        let mut seen_name = false;
+        let mut seen_permission = false;
 
         for attr in &variant.attrs {
             if !attr.path().is_ident("command") {
@@ -53,18 +56,28 @@ pub fn derive_command_metadata(input: TokenStream) -> TokenStream {
 
             if let Err(e) = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
+                    if seen_name {
+                        return Err(meta.error("duplicate `name` key in `command` attribute"));
+                    }
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;
                     if let Lit::Str(s) = lit {
                         cmd_name = Some(s.value());
+                        seen_name = true;
                     } else {
                         return Err(meta.error("expected string literal for `name`"));
                     }
                 } else if meta.path.is_ident("permission") {
+                    if seen_permission {
+                        return Err(
+                            meta.error("duplicate `permission` key in `command` attribute")
+                        );
+                    }
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;
                     if let Lit::Int(i) = lit {
                         cmd_perm = i.base10_parse()?;
+                        seen_permission = true;
                     } else {
                         return Err(meta.error("expected integer literal for `permission`"));
                     }
@@ -105,7 +118,7 @@ pub fn derive_command_metadata(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        impl #name {
+        impl #impl_generics #name #ty_generics #where_clause {
             /// Return the MPD wire name of this command (for ACK error messages).
             pub fn command_name(&self) -> &'static str {
                 match self {

@@ -1,0 +1,5 @@
+error: duplicate `name` key in `command` attribute
+ --> tests/ui/compile_fail/duplicate_name_key.rs:5:30
+  |
+5 |     #[command(name = "play", name = "stop")]
+  |                              ^^^^

@@ -9,7 +9,8 @@ fn test_add_single_song() {
     let id = queue.add(song);
 
     assert_eq!(queue.len(), 1);
-    assert_eq!(id, 0);
+    // MPD's IdTable counter starts at 1; id 0 is never a valid song id.
+    assert_eq!(id, 1);
     assert!(!queue.is_empty());
 }
 
@@ -22,9 +23,9 @@ fn test_add_multiple_songs() {
     let id3 = queue.add(create_test_song(3, "song3"));
 
     assert_eq!(queue.len(), 3);
-    assert_eq!(id1, 0);
-    assert_eq!(id2, 1);
-    assert_eq!(id3, 2);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(id3, 3);
 }
 
 #[test]
@@ -199,29 +200,37 @@ fn test_move_by_id() {
 }
 
 #[test]
-fn test_move_by_id_rejects_destination_equal_len() {
+fn test_move_by_id_to_len_is_rejected_not_panic() {
     let mut queue = Queue::new();
     let id1 = queue.add(create_test_song(1, "song1"));
-    queue.add(create_test_song(2, "song2"));
-    queue.add(create_test_song(3, "song3"));
+    let id2 = queue.add(create_test_song(2, "song2"));
+    let id3 = queue.add(create_test_song(3, "song3"));
 
     let len = queue.len() as u32;
     let success = queue.move_by_id(id1, len);
 
     assert!(!success);
+    assert_eq!(queue.len(), 3);
+    // Queue order must be unchanged.
     assert_eq!(queue.get(0).unwrap().id, id1);
+    assert_eq!(queue.get(1).unwrap().id, id2);
+    assert_eq!(queue.get(2).unwrap().id, id3);
 }
 
 #[test]
-fn test_move_bounds_consistent_between_position_and_id() {
+fn test_move_by_id_to_last_position_succeeds() {
     let mut queue = Queue::new();
     let id1 = queue.add(create_test_song(1, "song1"));
-    queue.add(create_test_song(2, "song2"));
-    queue.add(create_test_song(3, "song3"));
+    let id2 = queue.add(create_test_song(2, "song2"));
+    let id3 = queue.add(create_test_song(3, "song3"));
 
-    let len = queue.len() as u32;
-    assert!(!queue.move_item(0, len));
-    assert!(!queue.move_by_id(id1, len));
+    let last = queue.len() as u32 - 1;
+    let success = queue.move_by_id(id1, last);
+
+    assert!(success);
+    assert_eq!(queue.get(0).unwrap().id, id2);
+    assert_eq!(queue.get(1).unwrap().id, id3);
+    assert_eq!(queue.get(2).unwrap().id, id1);
 }
 
 #[test]

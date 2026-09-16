@@ -1,5 +1,5 @@
 use rmpd_core::error::Result;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
@@ -18,31 +18,45 @@ use crate::state::AppState;
 /// not the rmpd software version.
 const PROTOCOL_VERSION: &str = "0.24.0";
 
+/// Default maximum number of concurrent client connections when not
+/// overridden via `with_max_connections`.
+const DEFAULT_MAX_CONNECTIONS: usize = 100;
+
+/// Default idle timeout (seconds) for a connection waiting on its next
+/// command line, when not overridden via `with_connection_timeout`.
+const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 60;
+
+/// Hard cap on a single protocol line (MPD's own line-length limit), so a
+/// client that never sends a newline can't grow the read buffer without
+/// bound. Enforced by capping the reader with `AsyncReadExt::take` before
+/// `read_line`, not by checking the length after the fact.
+const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// Hard cap on the total size of an in-flight `command_list_begin` /
+/// `command_list_ok_begin` batch (MPD's default `max_command_list_size`),
+/// so an unterminated command list can't grow `batch_commands` without
+/// bound.
+const MAX_COMMAND_LIST_BYTES: usize = 2 * 1024 * 1024;
+
 /// Convert a `parse_command` error into the correct ACK response string.
-/// Arg-count errors ("wrong number / too few arguments") → code 2;
-/// unknown-command errors → code 5.
+/// `parse_command` returns one of three message shapes: the complete,
+/// final `unknown command "X"` text (an unrecognized command name,
+/// including a nested command-list token or an empty line); a raw
+/// tokenizer failure mirroring MPD's `Tokenizer` exceptions ("Invalid
+/// unquoted character", "Missing closing '\"'", "Space expected after
+/// closing '\"'") — both of these are thrown/caught before the command name
+/// is ever looked up, so they get code 5 with an empty `{}` field, matching
+/// MPD's `Response::command` defaulting to ""; or anything else — an arity
+/// mismatch ("wrong number / too few / too many arguments for ...") or a
+/// handler-level value error a token parser recorded ("Boolean (0/1)
+/// expected: X", "Malformed range: X", "Incorrect number of filter
+/// arguments", ...) — which gets code 2 against the real command name.
 fn parse_error_to_ack(cmd_line: &str, err: &str, index: i32) -> String {
-    if err.starts_with("wrong number of arguments for") || err.starts_with("too few arguments for")
-    {
-        // Extract the command name from the double-quoted portion of `err`.
-        let cmd_name = err
-            .find('"')
-            .and_then(|s| {
-                let rest = &err[s + 1..];
-                rest.find('"').map(|e| &rest[..e])
-            })
-            .unwrap_or(cmd_line);
-        ResponseBuilder::error(ACK_ERROR_ARG, index, cmd_name, err)
-    } else {
-        // Unknown command or malformed syntax.
-        let cmd_name = cmd_line.split_whitespace().next().unwrap_or(cmd_line);
-        ResponseBuilder::error(
-            ACK_ERROR_UNKNOWN,
-            index,
-            cmd_name,
-            &format!("unknown command \"{cmd_name}\""),
-        )
+    if err.starts_with("unknown command \"") {
+        return ResponseBuilder::error(ACK_ERROR_UNKNOWN, index, "", err);
     }
+    let cmd_name = cmd_line.split_whitespace().next().unwrap_or(cmd_line);
+    ResponseBuilder::error(ACK_ERROR_ARG, index, cmd_name, err)
 }
 
 /// Convert Unix timestamp to ISO 8601 format (RFC 3339)
@@ -52,6 +66,8 @@ pub struct MpdServer {
     unix_socket: Option<String>,
     state: AppState,
     shutdown_rx: broadcast::Receiver<()>,
+    max_connections: usize,
+    connection_timeout: std::time::Duration,
 }
 
 impl MpdServer {
@@ -61,6 +77,8 @@ impl MpdServer {
             unix_socket: None,
             state: AppState::new(),
             shutdown_rx,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            connection_timeout: std::time::Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS),
         }
     }
 
@@ -74,11 +92,28 @@ impl MpdServer {
             unix_socket: None,
             state,
             shutdown_rx,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            connection_timeout: std::time::Duration::from_secs(DEFAULT_CONNECTION_TIMEOUT_SECS),
         }
     }
 
     pub fn with_unix_socket(mut self, path: Option<String>) -> Self {
         self.unix_socket = path;
+        self
+    }
+
+    /// Set the maximum number of concurrent client connections. Connections
+    /// beyond this limit are rejected (dropped) as soon as they are accepted.
+    pub fn with_max_connections(mut self, n: usize) -> Self {
+        self.max_connections = n;
+        self
+    }
+
+    /// Set the idle timeout for a connection waiting on its next command
+    /// line. A client that connects and then sends nothing is disconnected
+    /// after this duration. Does not apply while a client is in `idle` mode.
+    pub fn with_connection_timeout(mut self, d: std::time::Duration) -> Self {
+        self.connection_timeout = d;
         self
     }
 
@@ -99,13 +134,22 @@ impl MpdServer {
         info!("queue playback manager started");
 
         // Optionally bind Unix socket
-        let unix_listener = if let Some(ref path) = self.unix_socket {
+        let unix_listener = if let Some(path) = &self.unix_socket {
             // Remove stale socket file if present
             let _ = std::fs::remove_file(path);
             Some(tokio::net::UnixListener::bind(path)?)
         } else {
             None
         };
+
+        // Bounds the number of concurrently active connections. Each spawned
+        // connection task holds a permit for its lifetime; the accept loop
+        // never blocks on permit acquisition (that would stall accepting from
+        // the other listener in the `select!` below) — it just drops the
+        // connection immediately if none are available.
+        let connection_limiter =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(self.max_connections));
+        let connection_timeout = self.connection_timeout;
 
         loop {
             tokio::select! {
@@ -114,12 +158,24 @@ impl MpdServer {
                     match result {
                         Ok((stream, addr)) => {
                             debug!("new connection from {}", addr);
-                            let state = self.state.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = handle_client(stream, state).await {
-                                    log_client_error("client", &e);
+                            match connection_limiter.clone().try_acquire_owned() {
+                                Ok(permit) => {
+                                    let state = self.state.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        if let Err(e) = handle_client(stream, state, connection_timeout).await {
+                                            log_client_error("client", &e);
+                                        }
+                                    });
                                 }
-                            });
+                                Err(_) => {
+                                    debug!(
+                                        "connection limit ({}) reached, dropping connection from {}",
+                                        self.max_connections, addr
+                                    );
+                                    drop(stream);
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("failed to accept connection: {}", e);
@@ -127,7 +183,7 @@ impl MpdServer {
                     }
                 }
                 result = async {
-                    if let Some(ref ul) = unix_listener {
+                    if let Some(ul) = &unix_listener {
                         ul.accept().await.map(|(s, _)| s)
                     } else {
                         std::future::pending::<tokio::io::Result<tokio::net::UnixStream>>().await
@@ -135,12 +191,24 @@ impl MpdServer {
                 } => {
                     match result {
                         Ok(stream) => {
-                            let state = self.state.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = handle_unix_client(stream, state).await {
-                                    log_client_error("unix client", &e);
+                            match connection_limiter.clone().try_acquire_owned() {
+                                Ok(permit) => {
+                                    let state = self.state.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        if let Err(e) = handle_unix_client(stream, state, connection_timeout).await {
+                                            log_client_error("unix client", &e);
+                                        }
+                                    });
                                 }
-                            });
+                                Err(_) => {
+                                    debug!(
+                                        "connection limit ({}) reached, dropping unix connection",
+                                        self.max_connections
+                                    );
+                                    drop(stream);
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("unix accept error: {}", e);
@@ -156,7 +224,7 @@ impl MpdServer {
         }
 
         // Clean up socket file on shutdown
-        if let Some(ref path) = self.unix_socket {
+        if let Some(path) = &self.unix_socket {
             let _ = std::fs::remove_file(path);
         }
 
@@ -188,7 +256,11 @@ fn log_client_error(kind: &str, e: &rmpd_core::error::RmpdError) {
     }
 }
 
-async fn handle_client(mut stream: TcpStream, state: AppState) -> Result<()> {
+async fn handle_client(
+    mut stream: TcpStream,
+    state: AppState,
+    timeout: std::time::Duration,
+) -> Result<()> {
     // Enable TCP_NODELAY for low-latency responses (disable Nagle's algorithm)
     stream.set_nodelay(true)?;
 
@@ -198,23 +270,43 @@ async fn handle_client(mut stream: TcpStream, state: AppState) -> Result<()> {
         .await?;
 
     let (reader, writer) = stream.into_split();
-    handle_client_inner(tokio::io::BufReader::new(reader), writer, state).await
+    handle_client_inner(
+        tokio::io::BufReader::new(reader),
+        writer,
+        state,
+        timeout,
+        false,
+    )
+    .await
 }
 
-async fn handle_unix_client(mut stream: UnixStream, state: AppState) -> Result<()> {
+async fn handle_unix_client(
+    mut stream: UnixStream,
+    state: AppState,
+    timeout: std::time::Duration,
+) -> Result<()> {
     // Send greeting
     stream
         .write_all(format!("OK MPD {PROTOCOL_VERSION}\n").as_bytes())
         .await?;
 
     let (reader, writer) = stream.into_split();
-    handle_client_inner(tokio::io::BufReader::new(reader), writer, state).await
+    handle_client_inner(
+        tokio::io::BufReader::new(reader),
+        writer,
+        state,
+        timeout,
+        true,
+    )
+    .await
 }
 
 async fn handle_client_inner(
     mut reader: tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>,
     mut writer: impl tokio::io::AsyncWrite + Unpin,
     state: AppState,
+    timeout: std::time::Duration,
+    is_local: bool,
 ) -> Result<()> {
     let mut line = String::new();
 
@@ -223,6 +315,9 @@ async fn handle_client_inner(
 
     // Per-client connection state
     let mut conn_state = crate::ConnectionState::new();
+    // Mirrors MPD's Client::IsLocal(): true only for the Unix domain socket,
+    // never for TCP (gates `config` and the `file://` line of `urlhandlers`).
+    conn_state.is_local = is_local;
     // Grant full permissions immediately when no password is configured;
     // otherwise the client starts with zero permissions and must `password` in.
     if state.password.is_none() {
@@ -235,21 +330,73 @@ async fn handle_client_inner(
     let mut batch_mode = false;
     let mut batch_ok_mode = false;
     let mut batch_commands: Vec<String> = Vec::new();
+    let mut batch_bytes: usize = 0;
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
+        // Cap the reader with `take` so `line` can never grow past
+        // `MAX_LINE_BYTES`, regardless of whether the client ever sends a
+        // newline — bounding the allocation, not just checking it after.
+        let bytes_read = match tokio::time::timeout(
+            timeout,
+            (&mut reader)
+                .take(MAX_LINE_BYTES as u64)
+                .read_line(&mut line),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                // Idle timeout: client connected but sent nothing for
+                // `timeout`. Disconnect as if it had closed the socket.
+                debug!("connection idle for {:?}, closing", timeout);
+                break;
+            }
+        };
 
         if bytes_read == 0 {
             // Connection closed
             break;
         }
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        if bytes_read == MAX_LINE_BYTES && !line.ends_with('\n') {
+            // Hit the cap without finding a terminator: reject and close
+            // rather than keep waiting for a newline that would let the
+            // client grow the buffer unbounded.
+            let response = Response::Text(ResponseBuilder::error(
+                ACK_ERROR_ARG,
+                0,
+                "",
+                "Line too long",
+            ));
+            writer.write_all(response.as_bytes()).await?;
+            writer.flush().await?;
+            break;
         }
 
+        let stripped = line.trim_end();
+        if !stripped
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+        {
+            // MPD closes the connection immediately on any line that doesn't
+            // start with a lowercase ASCII letter — empty lines, leading
+            // whitespace, stray HTTP probes, etc. (Client::ProcessLine's
+            // IsLowerAlphaASCII check; no ACK is sent for this).
+            debug!("malformed command line, closing connection: {:?}", stripped);
+            break;
+        }
+
+        if batch_mode && (stripped == "idle" || stripped == "noidle") {
+            // MPD: idle/noidle are async commands that can't be used inside a
+            // command list; the connection is closed immediately with no ACK
+            // (Client::ProcessLine's IsAsyncCommmand check).
+            debug!("async command {stripped:?} not allowed inside command list, closing");
+            break;
+        }
+
+        let trimmed = stripped;
         debug!("received command: {}", trimmed);
 
         if batch_mode && trimmed != "command_list_end" {
@@ -258,28 +405,34 @@ async fn handle_client_inner(
         }
 
         let response = match parse_command(trimmed) {
-            Ok(Command::CommandListBegin) => {
+            Ok(Command::CommandListBegin) if !batch_mode => {
                 batch_mode = true;
                 batch_ok_mode = false;
                 batch_commands.clear();
+                batch_bytes = 0;
                 continue; // Don't send response yet
             }
-            Ok(Command::CommandListOkBegin) => {
+            Ok(Command::CommandListOkBegin) if !batch_mode => {
                 batch_mode = true;
                 batch_ok_mode = true;
                 batch_commands.clear();
+                batch_bytes = 0;
                 continue; // Don't send response yet
             }
             Ok(Command::CommandListEnd) => {
                 if !batch_mode {
+                    // Real MPD has no dedicated "not in list" error:
+                    // `command_list_end` isn't in the `commands[]` table, so
+                    // outside a list it's looked up like any other name and
+                    // reported as unknown, same as a typo'd command.
                     Response::Text(ResponseBuilder::error(
-                        5,
+                        ACK_ERROR_UNKNOWN,
                         0,
-                        "command_list_end",
-                        "not in command list",
+                        "",
+                        "unknown command \"command_list_end\"",
                     ))
                 } else {
-                    let response = execute_command_list(
+                    let (response, should_close) = execute_command_list(
                         &batch_commands,
                         &state,
                         &mut conn_state,
@@ -289,16 +442,53 @@ async fn handle_client_inner(
                     batch_mode = false;
                     batch_ok_mode = false;
                     batch_commands.clear();
+                    batch_bytes = 0;
+                    if should_close {
+                        // `close` ran inside the list: send whatever partial
+                        // output preceded it, then drop the connection —
+                        // there's no final "OK" for a list that never
+                        // finished (matches MPD's `CommandResult::FINISH`).
+                        writer.write_all(response.as_bytes()).await?;
+                        writer.flush().await?;
+                        break;
+                    }
                     response
                 }
             }
             Ok(Command::Idle { subsystems }) if !batch_mode => {
-                Response::Text(handle_idle(&mut reader, &mut event_rx, subsystems).await)
+                // idle bypasses handle_command's generic permission check
+                // because it needs raw reader/event_rx access for long-poll;
+                // enforce the same PERMISSION_READ MPD requires here.
+                if !conn_state.has_permission(crate::connection::PERMISSION_READ) {
+                    Response::Text(ResponseBuilder::error(
+                        ACK_ERROR_PERMISSION,
+                        0,
+                        "idle",
+                        "you don't have permission for \"idle\"",
+                    ))
+                } else {
+                    Response::Text(handle_idle(&mut reader, &mut event_rx, subsystems).await)
+                }
             }
             Ok(_cmd) if batch_mode => {
-                // Accumulate commands in batch
-                batch_commands.push(trimmed.to_string());
-                continue; // Don't send response yet
+                // Accumulate commands in batch, capped so an unterminated
+                // command list can't grow `batch_commands` without bound.
+                if batch_bytes + trimmed.len() > MAX_COMMAND_LIST_BYTES {
+                    batch_mode = false;
+                    batch_ok_mode = false;
+                    batch_commands.clear();
+                    batch_bytes = 0;
+                    Response::Text(ResponseBuilder::error(
+                        ACK_ERROR_ARG,
+                        0,
+                        "command_list",
+                        "command list too large",
+                    ))
+                } else {
+                    batch_bytes += trimmed.len();
+                    batch_commands.push(trimmed.to_string());
+                    continue; // Don't send response yet
+                }
             }
             Ok(Command::NoIdle) => {
                 // `noidle` received while NOT in idle mode. This happens when an
@@ -334,32 +524,53 @@ async fn execute_command_list(
     state: &AppState,
     conn_state: &mut crate::ConnectionState,
     ok_mode: bool,
-) -> Response {
+) -> (Response, bool) {
     let mut response = String::new();
 
     for (index, cmd_str) in commands.iter().enumerate() {
         match parse_command(cmd_str) {
             Ok(Command::Idle { .. }) => {
-                return Response::Text(ResponseBuilder::error(
-                    5,
-                    index as i32,
-                    "idle",
-                    "cannot be used inside a command list",
-                ));
+                return (
+                    Response::Text(ResponseBuilder::error(
+                        5,
+                        index as i32,
+                        "idle",
+                        "cannot be used inside a command list",
+                    )),
+                    false,
+                );
             }
             Ok(Command::NoIdle) => {
                 // Silently ignore noidle inside command list
                 continue;
             }
-            Ok(Command::CommandListBegin)
-            | Ok(Command::CommandListOkBegin)
-            | Ok(Command::CommandListEnd) => {
-                return Response::Text(ResponseBuilder::error(
-                    5,
-                    index as i32,
-                    "command_list",
-                    "cannot be used inside a command list",
-                ));
+            Ok(Command::Close) => {
+                // MPD terminates the connection immediately when `close` runs
+                // inside a command list (`CommandResult::FINISH` short-circuits
+                // `ProcessCommandList`), emitting no further list output; the
+                // real `handle_command` dispatch for `Close` is unreachable by
+                // design, so it must never receive it here.
+                return (Response::Text(response), true);
+            }
+            Ok(
+                Command::CommandListBegin | Command::CommandListOkBegin | Command::CommandListEnd,
+            ) => {
+                // None of these are in MPD's `commands[]` table either — the
+                // top level treats them specially only when *not* already
+                // inside a list (`Client::ProcessLine` appends every other
+                // line verbatim once a list is active, with no nesting
+                // check). Encountered here, they're looked up like any
+                // other name and reported as unknown, aborting the list.
+                let name = cmd_str.split_whitespace().next().unwrap_or(cmd_str);
+                return (
+                    Response::Text(ResponseBuilder::error(
+                        5,
+                        index as i32,
+                        "",
+                        &format!("unknown command \"{name}\""),
+                    )),
+                    false,
+                );
             }
             Ok(cmd) => {
                 let cmd_response = handle_command(cmd, state, conn_state).await;
@@ -367,12 +578,15 @@ async fn execute_command_list(
                 let cmd_response_str = match cmd_response {
                     Response::Text(s) => s,
                     Response::Binary(_) => {
-                        return Response::Text(ResponseBuilder::error(
-                            5,
-                            index as i32,
-                            cmd_str,
-                            "binary commands not allowed in command list",
-                        ));
+                        return (
+                            Response::Text(ResponseBuilder::error(
+                                5,
+                                index as i32,
+                                cmd_str,
+                                "binary commands not allowed in command list",
+                            )),
+                            false,
+                        );
                     }
                 };
 
@@ -399,7 +613,7 @@ async fn execute_command_list(
                         cmd_response_str.clone()
                     };
                     response.push_str(&fixed);
-                    return Response::Text(response);
+                    return (Response::Text(response), false);
                 }
 
                 // Successful command: append response body (strip trailing "OK\n") to buffer
@@ -415,15 +629,19 @@ async fn execute_command_list(
             }
             Err(e) => {
                 // Parse error - return ACK with index
-                response.push_str(&parse_error_to_ack(cmd_str, &e, index as i32));
-                return Response::Text(response);
+                let ack = parse_error_to_ack(cmd_str, &e, index as i32);
+                response.push_str(&ack);
+                return (
+                    Response::Text(response),
+                    false,
+                );
             }
         }
     }
 
     // All commands succeeded
     response.push_str("OK\n");
-    Response::Text(response)
+    (Response::Text(response), false)
 }
 
 async fn handle_idle(
@@ -433,6 +651,23 @@ async fn handle_idle(
 ) -> String {
     use rmpd_core::event::Subsystem;
     use tokio::sync::broadcast::error::RecvError;
+
+    const ALL_SUBSYSTEMS: [Subsystem; 14] = [
+        Subsystem::Database,
+        Subsystem::Update,
+        Subsystem::StoredPlaylist,
+        Subsystem::Playlist,
+        Subsystem::Player,
+        Subsystem::Mixer,
+        Subsystem::Output,
+        Subsystem::Options,
+        Subsystem::Partition,
+        Subsystem::Sticker,
+        Subsystem::Subscription,
+        Subsystem::Message,
+        Subsystem::Neighbor,
+        Subsystem::Mount,
+    ];
 
     // Convert string subsystems to enum
     let filter_subsystems: Vec<Subsystem> = if subsystems.is_empty() {
@@ -464,37 +699,65 @@ async fn handle_idle(
     let mut line = String::new();
 
     loop {
+        let mut limited = (&mut *reader).take(MAX_LINE_BYTES as u64);
         tokio::select! {
             // Wait for event
             event_result = event_rx.recv() => {
                 match event_result {
                     Ok(event) => {
                         debug!("idle received event: {:?}", event);
-                        let event_subsystems = event.subsystems();
 
-                        // Check if event matches any subscribed subsystem
-                        let matches = if filter_subsystems.is_empty() {
-                            // No filter - return any event
-                            !event_subsystems.is_empty()
-                        } else {
-                            // Check if event matches any filtered subsystem
-                            event_subsystems.iter().any(|s| filter_subsystems.contains(s))
-                        };
+                        // MPD accumulates every pending change and reports
+                        // them all in one reply ("lists all changed systems
+                        // in a line", protocol.rst command_idle). Drain any
+                        // further events already queued so simultaneous
+                        // changes produce multiple `changed:` lines instead
+                        // of one idle reply per event.
+                        let mut raw_subsystems: Vec<Subsystem> = event.subsystems().to_vec();
+                        while let Ok(next_event) = event_rx.try_recv() {
+                            raw_subsystems.extend_from_slice(next_event.subsystems());
+                        }
 
-                        debug!("event matches filter: {}, subsystems: {:?}", matches, event_subsystems);
+                        let mut changed: Vec<Subsystem> = Vec::new();
+                        for s in raw_subsystems {
+                            let included =
+                                filter_subsystems.is_empty() || filter_subsystems.contains(&s);
+                            if included && !changed.contains(&s) {
+                                changed.push(s);
+                            }
+                        }
 
-                        if matches {
-                            // Return changed subsystem
-                            let subsystem_name = subsystem_to_string(event_subsystems[0]);
-                            debug!("idle returning: changed: {}", subsystem_name);
-                            return format!("changed: {subsystem_name}\nOK\n");
+                        if !changed.is_empty() {
+                            debug!("idle returning changed: {:?}", changed);
+                            let mut resp = String::new();
+                            for s in &changed {
+                                resp.push_str("changed: ");
+                                resp.push_str(subsystem_to_string(*s));
+                                resp.push('\n');
+                            }
+                            resp.push_str("OK\n");
+                            return resp;
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
-                        // Channel lagged - messages were dropped
-                        // Return immediately to notify client of changes
+                        // The channel overflowed; we no longer know exactly
+                        // which subsystems changed. Report every subsystem
+                        // the client is watching (or the full set when
+                        // unfiltered) rather than lose events.
                         debug!("idle: channel lagged, skipped {} messages", skipped);
-                        return "changed: player\nOK\n".to_owned();
+                        let reported: &[Subsystem] = if filter_subsystems.is_empty() {
+                            &ALL_SUBSYSTEMS
+                        } else {
+                            &filter_subsystems
+                        };
+                        let mut resp = String::new();
+                        for s in reported {
+                            resp.push_str("changed: ");
+                            resp.push_str(subsystem_to_string(*s));
+                            resp.push('\n');
+                        }
+                        resp.push_str("OK\n");
+                        return resp;
                     }
                     Err(RecvError::Closed) => {
                         // Channel closed - should not happen, but handle gracefully
@@ -504,7 +767,7 @@ async fn handle_idle(
                 }
             }
             // Wait for noidle command
-            line_result = reader.read_line(&mut line) => {
+            line_result = limited.read_line(&mut line) => {
                 if let Ok(bytes) = line_result
                     && bytes > 0 && line.trim() == "noidle" {
                         // Cancel idle
@@ -578,9 +841,11 @@ async fn handle_command(
         Command::TagTypes { subcommand } => {
             reflection::handle_tagtypes_command(conn_state, subcommand).await
         }
-        Command::UrlHandlers => reflection::handle_urlhandlers_command().await,
+        Command::UrlHandlers => reflection::handle_urlhandlers_command(conn_state).await,
         Command::Decoders => reflection::handle_decoders_command().await,
-        Command::StringNormalization => reflection::handle_stringnormalization_command().await,
+        Command::StringNormalization { subcommand } => {
+            reflection::handle_stringnormalization_command(conn_state, subcommand).await
+        }
         Command::Status => {
             let status = {
                 let mut guard = state.status.write().await;
@@ -594,8 +859,13 @@ async fn handle_command(
                 guard.clone()
             };
 
+            let last_loaded_playlist = state.queue.read().await.last_loaded_playlist().to_string();
             let mut resp = ResponseBuilder::new();
-            resp.status(&status);
+            resp.status(
+                &status,
+                &conn_state.current_partition,
+                &last_loaded_playlist,
+            );
             resp.ok()
         }
         Command::Stats => {
@@ -632,8 +902,11 @@ async fn handle_command(
             state.status.write().await.error = None;
             ResponseBuilder::new().ok()
         }
-        Command::Update { path } | Command::Rescan { path } => {
-            database::handle_update_command(state, path.as_deref()).await
+        Command::Update { path } => {
+            database::handle_update_command(state, path.as_deref(), false).await
+        }
+        Command::Rescan { path } => {
+            database::handle_update_command(state, path.as_deref(), true).await
         }
         Command::Find {
             filters,
@@ -647,19 +920,10 @@ async fn handle_command(
         } => database::handle_search_command(state, &filters, sort.as_deref(), window).await,
         Command::List {
             tag,
-            filter_tag,
-            filter_value,
-            group,
-        } => {
-            database::handle_list_command(
-                state,
-                &tag,
-                filter_tag.as_deref(),
-                filter_value.as_deref(),
-                group.as_deref(),
-            )
-            .await
-        }
+            filters,
+            groups,
+            window,
+        } => database::handle_list_command(state, &tag, &filters, &groups, window).await,
         Command::Count { filters, group } => {
             database::handle_count_command(state, &filters, group.as_deref()).await
         }
@@ -680,12 +944,16 @@ async fn handle_command(
         Command::PlChangesPosId { version, range } => {
             queue::handle_plchangesposid_command(state, version, range).await
         }
-        Command::PlaylistFind { tag, value } => {
-            queue::handle_playlistfind_command(state, &tag, &value).await
-        }
-        Command::PlaylistSearch { tag, value } => {
-            queue::handle_playlistsearch_command(state, &tag, &value).await
-        }
+        Command::PlaylistFind {
+            filters,
+            sort,
+            window,
+        } => queue::handle_playlistfind_command(state, &filters, sort.as_deref(), window).await,
+        Command::PlaylistSearch {
+            filters,
+            sort,
+            window,
+        } => queue::handle_playlistsearch_command(state, &filters, sort.as_deref(), window).await,
         // Playback commands
         Command::Play { position } => playback::handle_play_command(state, position).await,
         Command::Pause { state: pause_state } => {
@@ -755,10 +1023,14 @@ async fn handle_command(
         }
         Command::ReplayGainStatus => options::handle_replaygain_status_command(state).await,
         Command::BinaryLimit { size } => {
-            // Set binary limit (for large responses like images)
-            // Store in connection state if needed, for now just acknowledge
-            let _ = size;
-            ResponseBuilder::new().ok()
+            // MPD (ClientCommands.cxx handle_binary_limit): rejects sizes
+            // below 64 bytes with "Value too small".
+            if size < 64 {
+                ResponseBuilder::error(ACK_ERROR_ARG, 0, "binarylimit", "Value too small")
+            } else {
+                conn_state.binary_limit = size;
+                ResponseBuilder::new().ok()
+            }
         }
         Command::Protocol { subcommand } => {
             reflection::handle_protocol_command(conn_state, subcommand).await
@@ -785,74 +1057,152 @@ async fn handle_command(
         Command::PlaylistClear { name } => {
             playlists::handle_playlistclear_command(state, &name).await
         }
-        Command::PlaylistDelete { name, position } => {
-            playlists::handle_playlistdelete_command(state, &name, position).await
+        Command::PlaylistDelete { name, range } => {
+            playlists::handle_playlistdelete_command(state, &name, range).await
         }
         Command::PlaylistMove { name, from, to } => {
             playlists::handle_playlistmove_command(state, &name, from, to).await
         }
         Command::Rm { name } => playlists::handle_rm_command(state, &name).await,
         Command::Rename { from, to } => playlists::handle_rename_command(state, &from, &to).await,
-        Command::SearchPlaylist { name, tag, value } => {
-            playlists::handle_searchplaylist_command(state, &name, &tag, &value).await
-        }
+        Command::SearchPlaylist {
+            name,
+            filters,
+            window,
+        } => playlists::handle_searchplaylist_command(state, &name, &filters, window).await,
         Command::PlaylistLength { name } => {
             playlists::handle_playlistlength_command(state, &name).await
         }
         // Output control
-        Command::Outputs => outputs::handle_outputs_command(state).await,
-        Command::EnableOutput { id } => outputs::handle_enableoutput_command(state, id).await,
-        Command::DisableOutput { id } => outputs::handle_disableoutput_command(state, id).await,
-        Command::ToggleOutput { id } => outputs::handle_toggleoutput_command(state, id).await,
+        Command::Outputs => {
+            outputs::handle_outputs_command(state, &conn_state.current_partition).await
+        }
+        Command::EnableOutput { id } => {
+            outputs::handle_enableoutput_command(state, &conn_state.current_partition, id).await
+        }
+        Command::DisableOutput { id } => {
+            outputs::handle_disableoutput_command(state, &conn_state.current_partition, id).await
+        }
+        Command::ToggleOutput { id } => {
+            outputs::handle_toggleoutput_command(state, &conn_state.current_partition, id).await
+        }
         Command::OutputSet { id, name, value } => {
-            outputs::handle_outputset_command(state, id, &name, &value).await
+            outputs::handle_outputset_command(
+                state,
+                &conn_state.current_partition,
+                id,
+                &name,
+                &value,
+            )
+            .await
         }
         // Advanced database
-        Command::SearchAdd { tag, value } => {
-            database::handle_searchadd_command(state, &tag, &value).await
+        Command::SearchAdd {
+            filters,
+            sort,
+            window,
+            position,
+        } => {
+            database::handle_searchadd_command(state, &filters, sort.as_deref(), window, position)
+                .await
         }
-        Command::SearchAddPl { name, tag, value } => {
-            playlists::handle_searchaddpl_command(state, &name, &tag, &value).await
+        Command::SearchAddPl {
+            name,
+            filters,
+            sort,
+            window,
+            position,
+        } => {
+            playlists::handle_searchaddpl_command(
+                state,
+                &name,
+                &filters,
+                sort.as_deref(),
+                window,
+                position,
+            )
+            .await
         }
-        Command::FindAdd { tag, value } => {
-            database::handle_findadd_command(state, &tag, &value).await
+        Command::FindAdd {
+            filters,
+            sort,
+            window,
+            position,
+        } => {
+            database::handle_findadd_command(state, &filters, sort.as_deref(), window, position)
+                .await
         }
         Command::ListFiles { uri } => {
             database::handle_listfiles_command(state, uri.as_deref()).await
         }
-        Command::SearchCount { tag, value, group } => {
-            database::handle_searchcount_command(state, &tag, &value, group.as_deref()).await
+        Command::SearchCount { filters, group } => {
+            database::handle_searchcount_command(state, &filters, group.as_deref()).await
         }
         Command::GetFingerprint { uri } => {
             fingerprint::handle_getfingerprint_command(state, &uri).await
         }
         Command::ReadComments { uri } => database::handle_readcomments_command(state, &uri).await,
         // Stickers
-        Command::StickerGet { uri, name } => {
-            stickers::handle_sticker_get_command(state, &uri, &name).await
+        Command::StickerGet {
+            sticker_type,
+            uri,
+            name,
+        } => stickers::handle_sticker_get_command(state, &sticker_type, &uri, &name).await,
+        Command::StickerSet {
+            sticker_type,
+            uri,
+            name,
+            value,
+        } => stickers::handle_sticker_set_command(state, &sticker_type, &uri, &name, &value).await,
+        Command::StickerDelete {
+            sticker_type,
+            uri,
+            name,
+        } => {
+            stickers::handle_sticker_delete_command(state, &sticker_type, &uri, name.as_deref())
+                .await
         }
-        Command::StickerSet { uri, name, value } => {
-            stickers::handle_sticker_set_command(state, &uri, &name, &value).await
+        Command::StickerList { sticker_type, uri } => {
+            stickers::handle_sticker_list_command(state, &sticker_type, &uri).await
         }
-        Command::StickerDelete { uri, name } => {
-            stickers::handle_sticker_delete_command(state, &uri, name.as_deref()).await
+        Command::StickerFind {
+            sticker_type,
+            uri,
+            name,
+            value,
+            sort,
+            window,
+        } => {
+            stickers::handle_sticker_find_command(
+                state,
+                &sticker_type,
+                &uri,
+                &name,
+                value.as_deref(),
+                sort.as_deref(),
+                window,
+            )
+            .await
         }
-        Command::StickerList { uri } => stickers::handle_sticker_list_command(state, &uri).await,
-        Command::StickerFind { uri, name, value } => {
-            stickers::handle_sticker_find_command(state, &uri, &name, value.as_deref()).await
+        Command::StickerInc {
+            sticker_type,
+            uri,
+            name,
+            delta,
+        } => stickers::handle_sticker_inc_command(state, &sticker_type, &uri, &name, delta).await,
+        Command::StickerDec {
+            sticker_type,
+            uri,
+            name,
+            delta,
+        } => stickers::handle_sticker_dec_command(state, &sticker_type, &uri, &name, delta).await,
+        Command::StickerInvalid { sticker_type } => {
+            stickers::handle_sticker_invalid_command(&sticker_type)
         }
-        Command::StickerInc { uri, name, delta } => {
-            stickers::handle_sticker_inc_command(state, &uri, &name, delta).await
-        }
-        Command::StickerDec { uri, name, delta } => {
-            stickers::handle_sticker_dec_command(state, &uri, &name, delta).await
-        }
-        Command::StickerNames { uri } => {
-            stickers::handle_sticker_names_command(state, uri.as_deref()).await
-        }
+        Command::StickerNames => stickers::handle_sticker_names_command(state).await,
         Command::StickerTypes => stickers::handle_sticker_types_command().await,
-        Command::StickerNamesTypes { uri } => {
-            stickers::handle_sticker_namestypes_command(state, uri.as_deref()).await
+        Command::StickerNamesTypes { sticker_type } => {
+            stickers::handle_sticker_namestypes_command(state, sticker_type.as_deref()).await
         }
         // Partitions
         Command::Partition { name } => {
@@ -900,7 +1250,7 @@ async fn handle_command(
             queue::handle_cleartagid_command(state, id, tag.as_deref()).await
         }
         // Miscellaneous
-        Command::Config => connection::handle_config_command(state).await,
+        Command::Config => connection::handle_config_command(state, conn_state).await,
         Command::Kill => connection::handle_kill_command(state).await,
         Command::MixRampDb { decibels } => options::handle_mixrampdb_command(state, decibels).await,
         Command::MixRampDelay { seconds } => {
