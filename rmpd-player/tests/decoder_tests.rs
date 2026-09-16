@@ -19,8 +19,11 @@ fn decode_entire_file(path: &Path) -> Result<(Vec<f32>, u32, u8), String> {
     let mut decoder =
         SymphoniaDecoder::open(path).map_err(|e| format!("Failed to open decoder: {e}"))?;
 
-    let sample_rate = decoder.sample_rate();
-    let channels = decoder.channels();
+    let format = decoder
+        .format()
+        .map_err(|e| format!("Failed to probe decoder format: {e}"))?;
+    let sample_rate = format.sample_rate;
+    let channels = format.channels;
 
     let mut all_samples = Vec::new();
     let mut buffer = vec![0.0f32; 4096];
@@ -48,9 +51,9 @@ fn test_flac_format_detection() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open FLAC file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open FLAC file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100, "Expected 44.1kHz sample rate");
     assert_eq!(format.channels, 2, "Expected stereo");
 }
@@ -65,7 +68,7 @@ fn test_mp3_format_detection() {
 
     let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open MP3 file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100);
     assert_eq!(format.channels, 2);
 
@@ -83,9 +86,9 @@ fn test_ogg_format_detection() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open OGG file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open OGG file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100);
     assert_eq!(format.channels, 2);
 }
@@ -99,9 +102,9 @@ fn test_opus_format_detection() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open Opus file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open Opus file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 48000, "Opus uses 48kHz");
     assert_eq!(format.channels, 2);
 }
@@ -114,9 +117,9 @@ fn test_m4a_format_detection() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open M4A file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open M4A file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100);
     assert_eq!(format.channels, 2);
 }
@@ -129,9 +132,9 @@ fn test_wav_format_detection() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open WAV file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open WAV file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100);
     assert_eq!(format.channels, 2);
 }
@@ -389,9 +392,9 @@ fn test_high_resolution_audio() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open high-res file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open high-res file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 96000, "Expected 96kHz sample rate");
     assert_eq!(format.channels, 2);
 }
@@ -404,9 +407,9 @@ fn test_mono_audio() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open mono file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open mono file");
 
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.channels, 1, "Expected mono (1 channel)");
 }
 

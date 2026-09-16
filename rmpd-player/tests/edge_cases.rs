@@ -356,10 +356,10 @@ fn test_decoder_format_info_before_read() {
         return;
     }
 
-    let decoder = SymphoniaDecoder::open(&path).expect("Failed to open file");
+    let mut decoder = SymphoniaDecoder::open(&path).expect("Failed to open file");
 
     // Should be able to get format info before reading any samples
-    let format = decoder.format();
+    let format = decoder.format().expect("Failed to probe format");
     assert_eq!(format.sample_rate, 44100);
     assert_eq!(format.channels, 2);
 

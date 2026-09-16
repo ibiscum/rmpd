@@ -15,6 +15,23 @@ enum SendOutcome {
     Disconnected,
 }
 
+const DROP_WARN_EVERY: u32 = 8;
+
+fn should_warn_on_drop_streak(consecutive_write_drops: u32) -> bool {
+    consecutive_write_drops >= DROP_WARN_EVERY
+        && consecutive_write_drops.is_multiple_of(DROP_WARN_EVERY)
+}
+
+fn validate_dop_sample_format(sample_format: SampleFormat) -> Result<()> {
+    if sample_format == SampleFormat::I32 {
+        Ok(())
+    } else {
+        Err(RmpdError::Player(format!(
+            "DoP requires I32 output format, got {sample_format:?}"
+        )))
+    }
+}
+
 /// Send on the bounded channel, waiting up to `timeout` for space via
 /// non-blocking `try_send` retries. `std::sync::mpsc` has no stable timed send,
 /// and a plain blocking `send` would hang forever if the output callback stalls
@@ -46,6 +63,8 @@ pub struct DopOutput {
     sample_sender: Option<SyncSender<Vec<i32>>>,
     config: StreamConfig,
     is_paused: bool,
+    consecutive_write_drops: u32,
+    total_write_drops: u64,
 }
 
 impl DopOutput {
@@ -63,7 +82,28 @@ impl DopOutput {
             sample_sender: None,
             config: device_config.config,
             is_paused: false,
+            consecutive_write_drops: 0,
+            total_write_drops: 0,
         })
+    }
+
+    fn reset_drop_streak(&mut self) {
+        self.consecutive_write_drops = 0;
+    }
+
+    fn note_write_drop(&mut self, reason: &'static str) {
+        self.consecutive_write_drops = self.consecutive_write_drops.saturating_add(1);
+        self.total_write_drops = self.total_write_drops.saturating_add(1);
+
+        if should_warn_on_drop_streak(self.consecutive_write_drops) {
+            tracing::warn!(
+                metric = "rmpd.dop_output.write_drops",
+                reason,
+                consecutive = self.consecutive_write_drops,
+                total = self.total_write_drops,
+                "DoP write channel is dropping buffers"
+            );
+        }
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -77,49 +117,28 @@ impl DopOutput {
             sample_format: SampleFormat::I32,
         };
         let sample_format = device_config.find_dop_format()?;
+        validate_dop_sample_format(sample_format)?;
         tracing::info!("requested sample rate: {:?} Hz", self.config.sample_rate);
         tracing::info!("requested channels: {}", self.config.channels);
 
         let (tx, rx) = sync_channel::<Vec<i32>>(32);
 
-        let stream = match sample_format {
-            SampleFormat::I32 | SampleFormat::I24 => {
-                let mut buf = SampleBuffer::new(rx);
-                self.device
-                    .build_output_stream(
-                        self.config,
-                        move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
-                            for sample in data.iter_mut() {
-                                *sample = buf.next_sample();
-                            }
-                        },
-                        |err| {
-                            tracing::error!("DoP output error: {}", err);
-                        },
-                        None,
-                    )
-                    .map_err(|e| RmpdError::Player(format!("Failed to build DoP stream: {e}")))?
-            }
-            _ => {
-                tracing::warn!("no I32 format available, using fallback conversion");
-                let mut buf = SampleBuffer::new(rx);
-                self.device
-                    .build_output_stream(
-                        self.config,
-                        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                            for sample in data.iter_mut() {
-                                let val = buf.next_sample();
-                                *sample = (val as f32) / 2147483648.0;
-                            }
-                        },
-                        |err| {
-                            tracing::error!("DoP output error: {}", err);
-                        },
-                        None,
-                    )
-                    .map_err(|e| RmpdError::Player(format!("Failed to build DoP stream: {e}")))?
-            }
-        };
+        let mut buf = SampleBuffer::new(rx);
+        let stream = self
+            .device
+            .build_output_stream(
+                self.config,
+                move |data: &mut [i32], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = buf.next_sample();
+                    }
+                },
+                |err| {
+                    tracing::error!("DoP output error: {}", err);
+                },
+                None,
+            )
+            .map_err(|e| RmpdError::Player(format!("Failed to build DoP stream: {e}")))?;
 
         stream
             .play()
@@ -189,9 +208,16 @@ impl DopOutput {
         // disconnect), don't block forever — drop this buffer so the playback
         // loop stays responsive to stop/seek and the device can be released.
         match send_bounded(sender, samples.to_vec(), Duration::from_millis(500)) {
-            SendOutcome::Sent => Ok(samples.len()),
-            SendOutcome::TimedOut => Ok(0),
+            SendOutcome::Sent => {
+                self.reset_drop_streak();
+                Ok(samples.len())
+            }
+            SendOutcome::TimedOut => {
+                self.note_write_drop("timeout");
+                Ok(0)
+            }
             SendOutcome::Disconnected => {
+                self.note_write_drop("disconnected");
                 Err(RmpdError::Player("DoP output stream closed".to_owned()))
             }
         }
@@ -230,11 +256,17 @@ impl DopOutput {
             }
 
             // Best-effort: never block shutdown if the callback isn't draining.
-            let _ = sender.try_send(reset_samples);
+            match sender.try_send(reset_samples) {
+                Ok(()) => tracing::info!("PCM reset sequence sent"),
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!("PCM reset sequence not queued: channel full")
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::warn!("PCM reset sequence not queued: stream disconnected")
+                }
+            }
 
             std::thread::sleep(std::time::Duration::from_millis(150));
-
-            tracing::info!("PCM reset sequence sent");
         }
 
         if let Some(stream) = self.stream.take() {
@@ -245,6 +277,7 @@ impl DopOutput {
         }
         self.sample_sender = None;
         self.is_paused = false;
+        self.reset_drop_streak();
         Ok(())
     }
 
@@ -256,5 +289,38 @@ impl DopOutput {
 impl Drop for DopOutput {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_warning_threshold_is_every_nth_drop() {
+        assert!(!should_warn_on_drop_streak(0));
+        assert!(!should_warn_on_drop_streak(1));
+        assert!(!should_warn_on_drop_streak(7));
+        assert!(should_warn_on_drop_streak(8));
+        assert!(!should_warn_on_drop_streak(9));
+        assert!(should_warn_on_drop_streak(16));
+    }
+
+    #[test]
+    fn dop_sample_format_guard_accepts_i32() {
+        assert!(validate_dop_sample_format(SampleFormat::I32).is_ok());
+    }
+
+    #[test]
+    fn dop_sample_format_guard_rejects_non_i32() {
+        let err = validate_dop_sample_format(SampleFormat::I24)
+            .expect_err("I24 must be rejected for DoP until callback support exists");
+        let msg = err.to_string();
+        assert!(msg.contains("requires I32 output format"));
+
+        let err = validate_dop_sample_format(SampleFormat::F32)
+            .expect_err("F32 must be rejected for bit-exact DoP");
+        let msg = err.to_string();
+        assert!(msg.contains("requires I32 output format"));
     }
 }
