@@ -33,10 +33,64 @@ use rmpd_core::config::OutputConfig;
 use rmpd_core::error::{Result, RmpdError};
 use rmpd_core::song::AudioFormat;
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::thread;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// Bytes per interleaved F32LE sample.
 const SIZE_F32: usize = std::mem::size_of::<f32>();
+const STOP_TIMEOUT: Duration = Duration::from_millis(750);
+
+fn validate_started_state(
+    has_sender: bool,
+    has_terminate: bool,
+    has_loop_thread: bool,
+) -> Result<()> {
+    match (has_sender, has_terminate, has_loop_thread) {
+        (true, true, true) => Ok(()),
+        (false, false, false) => Err(RmpdError::Player("Output not started".to_owned())),
+        _ => Err(RmpdError::Player(
+            "Output internal state invalid (partially started)".to_owned(),
+        )),
+    }
+}
+
+fn wait_with_timeout_or_detach(handle: JoinHandle<()>, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if handle.is_finished() {
+            return handle
+                .join()
+                .map_err(|_| RmpdError::Player("pipewire loop thread panicked".to_owned()));
+        }
+        if start.elapsed() >= timeout {
+            // Dropping a JoinHandle detaches the thread, avoiding teardown hangs.
+            warn!(
+                "pipewire loop thread did not stop within {:?}; detaching",
+                timeout
+            );
+            drop(handle);
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn shutdown_runtime(
+    terminate: Option<pw::channel::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+    timeout: Duration,
+) -> Result<()> {
+    if let Some(term) = terminate {
+        // Best-effort: the loop may already be gone.
+        let _ = term.send(());
+    }
+    if let Some(handle) = handle {
+        wait_with_timeout_or_detach(handle, timeout)?;
+    }
+    Ok(())
+}
 
 /// A native PipeWire playback client.
 ///
@@ -82,8 +136,30 @@ impl PipeWireOutput {
     }
 
     pub fn start(&mut self) -> Result<()> {
-        if self.loop_thread.is_some() {
-            return Ok(());
+        if self.sample_sender.is_some() || self.terminate.is_some() || self.loop_thread.is_some() {
+            match validate_started_state(
+                self.sample_sender.is_some(),
+                self.terminate.is_some(),
+                self.loop_thread.is_some(),
+            ) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(
+                        "pipewire output had inconsistent start state (sender={}, terminate={}, loop_thread={}): {}; rebuilding",
+                        self.sample_sender.is_some(),
+                        self.terminate.is_some(),
+                        self.loop_thread.is_some(),
+                        e
+                    );
+                    self.sample_sender = None;
+                    let _ = shutdown_runtime(
+                        self.terminate.take(),
+                        self.loop_thread.take(),
+                        STOP_TIMEOUT,
+                    );
+                    self.pause_state.set_paused(false);
+                }
+            }
         }
 
         let sample_rate = self.format.sample_rate;
@@ -281,27 +357,26 @@ impl PipeWireOutput {
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<()> {
+        validate_started_state(
+            self.sample_sender.is_some(),
+            self.terminate.is_some(),
+            self.loop_thread.is_some(),
+        )?;
         if self.pause_state.is_paused() {
             return Ok(());
         }
-        match &self.sample_sender {
-            Some(sender) => sender
-                .send(samples.to_vec())
-                .map_err(|_| RmpdError::Player("pipewire output gone".to_owned())),
-            None => Err(RmpdError::Player("pipewire output not started".to_owned())),
-        }
+        let sender = self.sample_sender.as_ref().ok_or_else(|| {
+            RmpdError::Player("Output internal state invalid (missing sender)".to_owned())
+        })?;
+        sender
+            .send(samples.to_vec())
+            .map_err(|_| RmpdError::Player("pipewire output gone".to_owned()))
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        if let Some(term) = self.terminate.take() {
-            // Best-effort: the loop may already be gone.
-            let _ = term.send(());
-        }
         // Drop the sender so the SampleBuffer sees a disconnected channel.
         self.sample_sender = None;
-        if let Some(handle) = self.loop_thread.take() {
-            let _ = handle.join();
-        }
+        shutdown_runtime(self.terminate.take(), self.loop_thread.take(), STOP_TIMEOUT)?;
         self.pause_state.set_paused(false);
         Ok(())
     }
@@ -347,11 +422,31 @@ impl AudioOutput for PipeWireOutput {
     fn pause_state_mut(&mut self) -> &mut PauseState {
         &mut self.pause_state
     }
+    fn pause(&mut self) -> Result<()> {
+        validate_started_state(
+            self.sample_sender.is_some(),
+            self.terminate.is_some(),
+            self.loop_thread.is_some(),
+        )?;
+        self.pause_state.set_paused(true);
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<()> {
+        validate_started_state(
+            self.sample_sender.is_some(),
+            self.terminate.is_some(),
+            self.loop_thread.is_some(),
+        )?;
+        self.pause_state.set_paused(false);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn channel_depth_scales_with_buffer_time() {
@@ -371,6 +466,69 @@ mod tests {
     fn channel_depth_clamps_to_minimum() {
         // Tiny buffer would round to 1 chunk, but we never go below 4.
         assert_eq!(channel_depth(1, 8_000, 1), 4);
+    }
+
+    #[test]
+    fn started_state_validation_is_strict() {
+        assert!(validate_started_state(true, true, true).is_ok());
+
+        let not_started = validate_started_state(false, false, false)
+            .err()
+            .expect("all-false should be not started");
+        assert!(not_started.to_string().contains("not started"));
+
+        let partial = validate_started_state(true, false, true)
+            .err()
+            .expect("partial state should be invalid");
+        assert!(partial.to_string().contains("partially started"));
+    }
+
+    #[test]
+    fn write_before_start_returns_error() {
+        let format = AudioFormat::new(48_000, 2, 32);
+        let cfg = OutputConfig::cpal_default();
+        let mut out = PipeWireOutput::new(format, &cfg, 500).expect("construct");
+        let err = out
+            .write(&[0.0_f32; 8])
+            .err()
+            .expect("write before start must fail");
+        assert!(err.to_string().to_ascii_lowercase().contains("not started"));
+    }
+
+    #[test]
+    fn pause_and_resume_before_start_return_error() {
+        let format = AudioFormat::new(48_000, 2, 32);
+        let cfg = OutputConfig::cpal_default();
+        let mut out = PipeWireOutput::new(format, &cfg, 500).expect("construct");
+
+        let pause_err = out.pause().err().expect("pause before start must fail");
+        assert!(pause_err.to_string().to_ascii_lowercase().contains("not started"));
+
+        let resume_err = out
+            .resume()
+            .err()
+            .expect("resume before start must fail");
+        assert!(
+            resume_err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("not started")
+        );
+    }
+
+    #[test]
+    fn bounded_wait_detaches_unresponsive_thread() {
+        let handle = thread::spawn(|| {
+            thread::sleep(Duration::from_secs(5));
+        });
+
+        let t0 = Instant::now();
+        wait_with_timeout_or_detach(handle, Duration::from_millis(50))
+            .expect("timeout-detach should succeed");
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "bounded wait should return quickly"
+        );
     }
 
     #[test]

@@ -59,7 +59,7 @@ impl RecorderOutput {
     /// exceeds `u32::MAX` it is clamped (with a warning) rather than wrapped — this keeps
     /// the header internally consistent (if truncated) instead of corrupt. A correct fix
     /// for recordings beyond ~4 GiB of PCM data would require RF64/BWF, out of scope here.
-    fn finalize(path: &str, frames: u64, channels: u8) {
+    fn finalize(path: &str, frames: u64, channels: u8) -> Result<()> {
         let data_bytes_u64 = frames * channels as u64 * 2;
         let riff_size_u64 = 36 + data_bytes_u64;
         let data_bytes = if data_bytes_u64 > u32::MAX as u64 {
@@ -72,19 +72,25 @@ impl RecorderOutput {
             data_bytes_u64 as u32
         };
         let riff_size = riff_size_u64.min(u32::MAX as u64) as u32;
-        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
-            let _ = f
-                .seek(SeekFrom::Start(4))
-                .and_then(|_| f.write_all(&riff_size.to_le_bytes()));
-            let _ = f
-                .seek(SeekFrom::Start(40))
-                .and_then(|_| f.write_all(&data_bytes.to_le_bytes()));
-        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(|e| RmpdError::Player(format!("recorder finalize open {}: {e}", path)))?;
+        f.seek(SeekFrom::Start(4))
+            .and_then(|_| f.write_all(&riff_size.to_le_bytes()))
+            .map_err(|e| RmpdError::Player(format!("recorder finalize riff size: {e}")))?;
+        f.seek(SeekFrom::Start(40))
+            .and_then(|_| f.write_all(&data_bytes.to_le_bytes()))
+            .map_err(|e| RmpdError::Player(format!("recorder finalize data size: {e}")))?;
+        Ok(())
     }
 }
 
 impl AudioOutput for RecorderOutput {
     fn start(&mut self) -> Result<()> {
+        if self.writer.is_some() {
+            return Ok(());
+        }
         let file = File::create(&self.path)
             .map_err(|e| RmpdError::Player(format!("cannot create {}: {e}", self.path)))?;
         let mut w = BufWriter::new(file);
@@ -111,9 +117,11 @@ impl AudioOutput for RecorderOutput {
 
     fn stop(&mut self) -> Result<()> {
         if let Some(mut w) = self.writer.take() {
-            let _ = w.flush();
+            w.flush()
+                .map_err(|e| RmpdError::Player(format!("recorder flush: {e}")))?;
+            Self::finalize(&self.path, self.frames_written, self.format.channels)?;
         }
-        Self::finalize(&self.path, self.frames_written, self.format.channels);
+        self.pause_state.set_paused(false);
         info!("recorder output stopped: {}", self.path);
         Ok(())
     }
@@ -123,5 +131,71 @@ impl AudioOutput for RecorderOutput {
     }
     fn pause_state_mut(&mut self) -> &mut PauseState {
         &mut self.pause_state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn test_format() -> AudioFormat {
+        AudioFormat {
+            sample_rate: 44_100,
+            channels: 2,
+            bits_per_sample: 16,
+        }
+    }
+
+    #[test]
+    fn start_is_idempotent_noop_when_already_started() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("rec.wav");
+        let path = path.to_string_lossy().to_string();
+
+        let mut out = RecorderOutput::new(path, test_format());
+        out.start().expect("initial start should succeed");
+        out.write(&[0.0, 0.1, 0.2, 0.3])
+            .expect("write should succeed");
+        let frames_before = out.frames_written;
+
+        out.start().expect("second start should be idempotent");
+        assert_eq!(
+            out.frames_written, frames_before,
+            "idempotent start must not reset recording state"
+        );
+
+        out.stop().expect("stop should succeed");
+    }
+
+    #[test]
+    fn finalize_missing_file_returns_error() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let missing = tmp.path().join("missing.wav");
+        let missing = missing.to_string_lossy().to_string();
+
+        let err = RecorderOutput::finalize(&missing, 0, 2)
+            .err()
+            .expect("finalize should fail when file is missing");
+        assert!(err.to_string().contains("finalize open"));
+    }
+
+    #[test]
+    fn stop_propagates_finalize_failure() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("rec.wav");
+        let path_string = path.to_string_lossy().to_string();
+
+        let mut out = RecorderOutput::new(path_string.clone(), test_format());
+        out.start().expect("start should succeed");
+
+        // Remove the file before stop so header patching cannot reopen it.
+        fs::remove_file(&path).expect("remove recording file");
+
+        let err = out
+            .stop()
+            .err()
+            .expect("stop should surface finalize failure");
+        assert!(err.to_string().contains("finalize open"));
     }
 }

@@ -435,8 +435,9 @@ impl PlaybackEngine {
     }
 
     pub async fn set_volume(&mut self, vol: u8) -> Result<()> {
-        self.volume.store(vol, Ordering::Release);
-        self.event_bus.emit(Event::VolumeChanged(vol));
+        let clamped = vol.min(100);
+        self.volume.store(clamped, Ordering::Release);
+        self.event_bus.emit(Event::VolumeChanged(clamped));
         Ok(())
     }
 
@@ -1421,5 +1422,28 @@ mod tests {
         assert!(should_warn_on_dop_drops(8));
         assert!(!should_warn_on_dop_drops(9));
         assert!(should_warn_on_dop_drops(16));
+    }
+
+    #[test]
+    fn set_volume_clamps_above_100() {
+        let event_bus = EventBus::new();
+        let status = Arc::new(RwLock::new(rmpd_core::state::PlayerStatus::default()));
+        let atomic_state = Arc::new(AtomicU8::new(PlayerState::Stop.to_atomic()));
+        let mut engine = PlaybackEngine::new(event_bus, status, atomic_state);
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime should build");
+        rt.block_on(async {
+            engine
+                .set_volume(200)
+                .await
+                .expect("set_volume should succeed");
+            assert_eq!(engine.get_volume().await, 100);
+
+            engine
+                .set_volume(80)
+                .await
+                .expect("set_volume should succeed");
+            assert_eq!(engine.get_volume().await, 80);
+        });
     }
 }

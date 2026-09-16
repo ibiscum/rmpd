@@ -30,6 +30,7 @@ use rmpd_core::error::{Result, RmpdError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::Mutex as StdMutex;
 use std::thread::{self, JoinHandle};
 use tracing::{debug, warn};
 
@@ -51,6 +52,8 @@ pub struct MultiOutput {
     /// Shared, checked by every worker before writing a dequeued `Samples`
     /// chunk. `false` while paused or stopping — see module docs.
     active: Arc<AtomicBool>,
+    /// Last primary-backend failure, surfaced from worker to caller.
+    primary_error: Arc<StdMutex<Option<String>>>,
 }
 
 impl MultiOutput {
@@ -66,7 +69,14 @@ impl MultiOutput {
         depth: usize,
         volume: Arc<AtomicU8>,
     ) -> Result<Self> {
+        if outputs.is_empty() {
+            return Err(RmpdError::Player(
+                "multi-output requires at least one backend".to_owned(),
+            ));
+        }
+
         let active = Arc::new(AtomicBool::new(true));
+        let primary_error = Arc::new(StdMutex::new(None));
         let mut workers = Vec::with_capacity(outputs.len());
 
         for (idx, mut out) in outputs.into_iter().enumerate() {
@@ -74,6 +84,7 @@ impl MultiOutput {
             let (tx, rx) = sync_channel::<OutputMsg>(depth);
             let vol_arc = volume.clone();
             let worker_active = active.clone();
+            let worker_primary_error = Arc::clone(&primary_error);
 
             let handle = thread::Builder::new()
                 .name(if primary {
@@ -83,6 +94,11 @@ impl MultiOutput {
                 })
                 .spawn(move || {
                     if let Err(e) = out.start() {
+                        if primary
+                            && let Ok(mut g) = worker_primary_error.lock()
+                        {
+                            *g = Some(format!("primary output failed to start: {e}"));
+                        }
                         warn!(
                             "{} output worker failed to start: {}",
                             if primary { "primary" } else { "secondary" },
@@ -95,7 +111,17 @@ impl MultiOutput {
                         if primary { "primary" } else { "secondary" }
                     );
                     let mut vol = VolumeFilter::new(vol_arc);
+                    let mut output_paused = false;
                     loop {
+                        let desired_active = worker_active.load(Ordering::Acquire);
+                        if !desired_active && !output_paused {
+                            let _ = out.pause();
+                            output_paused = true;
+                        } else if desired_active && output_paused {
+                            let _ = out.resume();
+                            output_paused = false;
+                        }
+
                         match rx.recv() {
                             Ok(OutputMsg::Samples(arc)) => {
                                 if !worker_active.load(Ordering::Acquire) {
@@ -107,13 +133,25 @@ impl MultiOutput {
                                 }
                                 let mut buf = arc.to_vec();
                                 vol.apply(&mut buf);
-                                let _ = out.write(&buf);
+                                if let Err(e) = out.write(&buf) {
+                                    if primary {
+                                        if let Ok(mut g) = worker_primary_error.lock() {
+                                            *g = Some(format!("primary output write failed: {e}"));
+                                        }
+                                        warn!("primary output write failed: {}", e);
+                                        let _ = out.stop();
+                                        break;
+                                    }
+                                    warn!("secondary output write failed: {}", e);
+                                }
                             }
                             Ok(OutputMsg::Pause) => {
                                 let _ = out.pause();
+                                output_paused = true;
                             }
                             Ok(OutputMsg::Resume) => {
                                 let _ = out.resume();
+                                output_paused = false;
                             }
                             Ok(OutputMsg::Stop) => {
                                 let _ = out.stop();
@@ -140,7 +178,11 @@ impl MultiOutput {
             });
         }
 
-        Ok(MultiOutput { workers, active })
+        Ok(MultiOutput {
+            workers,
+            active,
+            primary_error,
+        })
     }
 
     /// Fan one chunk to all outputs.
@@ -151,7 +193,15 @@ impl MultiOutput {
         for w in &self.workers {
             if w.primary {
                 w.tx.send(OutputMsg::Samples(chunk.clone()))
-                    .map_err(|_| RmpdError::Player("primary output stopped".into()))?;
+                    .map_err(|_| {
+                        let msg = self
+                            .primary_error
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.clone())
+                            .unwrap_or_else(|| "primary output stopped".to_owned());
+                        RmpdError::Player(msg)
+                    })?;
             } else {
                 // Best-effort: silently drop on Full or Disconnected.
                 let _ = w.tx.try_send(OutputMsg::Samples(chunk.clone()));
@@ -178,29 +228,30 @@ impl MultiOutput {
 
     /// Send `Stop` to all workers and join cleanly.
     ///
-    /// The primary is joined so the caller knows it has fully drained.
+    /// If the primary worker has already exited, it is joined.
     /// Secondaries are sent `Stop` on a best-effort basis (the channel may be
-    /// full if the secondary is stalled) and their threads are detached — they
-    /// will exit on their own once any blocking write returns.
+    /// full if the secondary is stalled) and their threads are detached.
+    /// A still-busy primary is also detached so shutdown cannot hang forever on
+    /// a backend write that never returns.
     pub fn stop(mut self) {
         // Stop feeding audio to the device immediately; without this the
         // primary worker would play out its entire backlog (up to `depth`
         // chunks) before it even reaches the Stop message behind them.
         self.active.store(false, Ordering::Release);
-        // Send Stop: blocking for primary (ensures it is received), try for
-        // secondaries (their channel may be full if they are stalled).
+        // Send Stop best-effort for every worker. Blocking here can deadlock
+        // shutdown if a channel is full while that worker is stalled in write().
         for w in &self.workers {
-            if w.primary {
-                let _ = w.tx.send(OutputMsg::Stop);
-            } else {
-                let _ = w.tx.try_send(OutputMsg::Stop);
-            }
+            let _ = w.tx.try_send(OutputMsg::Stop);
         }
-        // Join primary; drop secondary handles (threads detach).
+        // Join an already-finished primary; detach busy workers.
         for w in &mut self.workers {
             if w.primary {
                 if let Some(h) = w.handle.take() {
-                    let _ = h.join();
+                    if h.is_finished() {
+                        let _ = h.join();
+                    } else {
+                        warn!("primary output worker is still busy during stop; detaching");
+                    }
                 }
             } else {
                 w.handle.take(); // detach
@@ -214,16 +265,14 @@ impl Drop for MultiOutput {
         // Mirror stop() — handles may be None if stop() was already called.
         self.active.store(false, Ordering::Release);
         for w in &self.workers {
-            if w.primary {
-                let _ = w.tx.send(OutputMsg::Stop);
-            } else {
-                let _ = w.tx.try_send(OutputMsg::Stop);
-            }
+            let _ = w.tx.try_send(OutputMsg::Stop);
         }
         for w in &mut self.workers {
             if w.primary {
                 if let Some(h) = w.handle.take() {
-                    let _ = h.join();
+                    if h.is_finished() {
+                        let _ = h.join();
+                    }
                 }
             } else {
                 w.handle.take();
@@ -237,7 +286,7 @@ mod tests {
     use super::*;
     use crate::audio_output::PauseState;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // ── Test outputs ──────────────────────────────────────────────────────────
 
@@ -306,6 +355,28 @@ mod tests {
             std::thread::sleep(self.delay);
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+        fn stop(&mut self) -> rmpd_core::error::Result<()> {
+            Ok(())
+        }
+        fn pause_state(&self) -> &PauseState {
+            &self.state
+        }
+        fn pause_state_mut(&mut self) -> &mut PauseState {
+            &mut self.state
+        }
+    }
+
+    struct FailingWriteOutput {
+        state: PauseState,
+    }
+
+    impl AudioOutput for FailingWriteOutput {
+        fn start(&mut self) -> rmpd_core::error::Result<()> {
+            Ok(())
+        }
+        fn write(&mut self, _samples: &[f32]) -> rmpd_core::error::Result<()> {
+            Err(RmpdError::Player("simulated write failure".to_owned()))
         }
         fn stop(&mut self) -> rmpd_core::error::Result<()> {
             Ok(())
@@ -410,5 +481,75 @@ mod tests {
         );
 
         multi.stop();
+    }
+
+    #[test]
+    fn spawn_without_outputs_returns_error() {
+        let err = MultiOutput::spawn(vec![], 4, Arc::new(AtomicU8::new(100)))
+            .err()
+            .expect("spawn with no outputs must fail");
+        assert!(
+            err.to_string().contains("at least one backend"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn primary_write_failure_surfaces_to_caller() {
+        let multi = MultiOutput::spawn(
+            vec![Box::new(FailingWriteOutput {
+                state: PauseState::new(),
+            })],
+            4,
+            Arc::new(AtomicU8::new(100)),
+        )
+        .expect("spawn failed");
+
+        let chunk: Arc<[f32]> = Arc::from(vec![0.0f32; 64].as_slice());
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut saw_error = None;
+
+        while Instant::now() < deadline {
+            match multi.write(Arc::clone(&chunk)) {
+                Ok(()) => std::thread::sleep(Duration::from_millis(5)),
+                Err(e) => {
+                    saw_error = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+
+        let err = saw_error.expect("expected write to surface primary failure");
+        assert!(
+            err.contains("simulated write failure") || err.contains("primary output write failed"),
+            "unexpected error: {err}"
+        );
+
+        multi.stop();
+    }
+
+    #[test]
+    fn stop_returns_promptly_with_blocked_primary() {
+        let primary = BlockingOutput {
+            state: PauseState::new(),
+        };
+
+        let multi = MultiOutput::spawn(
+            vec![Box::new(primary)],
+            1,
+            Arc::new(AtomicU8::new(100)),
+        )
+        .expect("spawn failed");
+
+        let chunk: Arc<[f32]> = Arc::from(vec![0.0f32; 64].as_slice());
+        multi.write(Arc::clone(&chunk)).expect("write must succeed");
+        std::thread::sleep(Duration::from_millis(50));
+
+        let start = Instant::now();
+        multi.stop();
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "stop should not block on a stalled primary"
+        );
     }
 }

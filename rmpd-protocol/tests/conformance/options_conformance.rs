@@ -54,6 +54,38 @@ async fn volume_relative_change() {
 }
 
 #[tokio::test]
+async fn volume_relative_change_clamps_upper_bound() {
+    let (_server, mut client) = setup().await;
+    client.command("setvol 95").await;
+
+    let resp = client.command("volume 50").await;
+    assert_ok(&resp);
+
+    let status = client.command("status").await;
+    assert_eq!(get_field(&status, "volume"), Some("100"));
+
+    let getvol = client.command("getvol").await;
+    assert_ok(&getvol);
+    assert_eq!(get_field(&getvol, "volume"), Some("100"));
+}
+
+#[tokio::test]
+async fn volume_relative_change_clamps_lower_bound() {
+    let (_server, mut client) = setup().await;
+    client.command("setvol 5").await;
+
+    let resp = client.command("volume -50").await;
+    assert_ok(&resp);
+
+    let status = client.command("status").await;
+    assert_eq!(get_field(&status, "volume"), Some("0"));
+
+    let getvol = client.command("getvol").await;
+    assert_ok(&getvol);
+    assert_eq!(get_field(&getvol, "volume"), Some("0"));
+}
+
+#[tokio::test]
 async fn repeat_toggle() {
     let (_server, mut client) = setup().await;
 
