@@ -5,6 +5,9 @@ on:
     - cron: "0 5 * * 1" # Every Monday at 5am UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   renovate:
     name: Renovate
