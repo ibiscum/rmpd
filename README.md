@@ -409,6 +409,19 @@ See [CI.md](CI.md) for detailed CI/CD documentation.
 
 ## Compatibility
 
+### MPD Parity Tracking
+
+Protocol parity progress is tracked in:
+
+- [docs/mpd-parity-matrix.md](docs/mpd-parity-matrix.md) — behavior-level parity status and next audit milestones
+- [docs/mpd-command-parity-checklist.md](docs/mpd-command-parity-checklist.md) — generated command-table parity report (permissions and argument ranges)
+
+Regenerate the command checklist after parser or command metadata updates with:
+
+```bash
+./scripts/generate_mpd_command_parity_checklist.sh
+```
+
 ### Tested MPD Clients
 
 - ✅ **mpc** - Command-line client

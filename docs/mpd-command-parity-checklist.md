@@ -2,7 +2,7 @@
 
 Auto-generated against MPD command table and local parser metadata.
 
-- Generated: 2026-09-17T15:07:07Z
+- Generated: 2026-09-17T20:00:22Z
 - Upstream source: src/command/AllCommands.cxx
 - Local source: rmpd-protocol/src/parser.rs
 
