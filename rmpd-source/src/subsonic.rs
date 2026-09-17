@@ -38,12 +38,40 @@ fn file_ext_for(c: &opensubsonic::data::Child) -> Option<String> {
     if let Some(s) = c.suffix.as_deref()
         && !s.is_empty()
     {
-        return Some(s.to_ascii_lowercase());
+        let ext = s.to_ascii_lowercase();
+        if is_known_audio_ext(&ext) {
+            return Some(ext);
+        }
     }
     c.content_type
         .as_deref()
         .and_then(mime_to_ext)
         .map(str::to_owned)
+}
+
+/// Keep this in sync with `extract_remote_id`'s known extension set in
+/// `rmpd-source/src/lib.rs`.
+fn is_known_audio_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "flac"
+            | "mp3"
+            | "ogg"
+            | "oga"
+            | "opus"
+            | "m4a"
+            | "aac"
+            | "mp4"
+            | "wav"
+            | "wv"
+            | "ape"
+            | "wma"
+            | "alac"
+            | "aif"
+            | "aiff"
+            | "dsf"
+            | "dff"
+    )
 }
 
 /// Map a common audio MIME type to a file extension. Returns `None` for
@@ -100,6 +128,7 @@ pub fn map_err(e: SubsonicError) -> SourceError {
 pub struct SubsonicConfig {
     pub name: String,
     pub url: String,
+    pub allow_insecure_http: bool,
     pub username: Option<String>,
     pub password: Option<String>,
     pub api_key: Option<String>,
@@ -116,6 +145,7 @@ impl std::fmt::Debug for SubsonicConfig {
         f.debug_struct("SubsonicConfig")
             .field("name", &self.name)
             .field("url", &self.url)
+            .field("allow_insecure_http", &self.allow_insecure_http)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
@@ -137,6 +167,28 @@ impl SubsonicConfig {
             SourceError::Config("subsonic source requires a `url` setting".to_owned())
         })?;
 
+        let allow_insecure_http = match cfg.setting_str("allow_insecure_http") {
+            Some(v) => match v.to_ascii_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(SourceError::Config(format!(
+                        "invalid `allow_insecure_http` value `{v}`: expected true or false"
+                    )));
+                }
+            },
+            None => false,
+        };
+
+        let parsed_url = reqwest::Url::parse(&url)
+            .map_err(|e| SourceError::Config(format!("invalid `url` value `{url}`: {e}")))?;
+        if parsed_url.scheme() != "https" && !allow_insecure_http {
+            return Err(SourceError::Config(
+                "subsonic source requires an `https` url; set `allow_insecure_http = true` to override"
+                    .to_owned(),
+            ));
+        }
+
         let api_key = cfg.setting_str("api_key");
         let username = cfg.setting_str("username");
         let password = cfg.setting_str("password");
@@ -148,20 +200,32 @@ impl SubsonicConfig {
             ));
         }
 
-        let max_bitrate = cfg
-            .setting_str("max_bitrate")
-            .and_then(|s| s.parse::<u32>().ok());
+        let max_bitrate = match cfg.setting_str("max_bitrate") {
+            Some(v) => Some(v.parse::<u32>().map_err(|e| {
+                SourceError::Config(format!("invalid `max_bitrate` value `{v}`: {e}"))
+            })?),
+            None => None,
+        };
 
         let format = cfg.setting_str("format");
 
-        let accept_invalid_certs = cfg
-            .setting_str("accept_invalid_certs")
-            .map(|s| s.to_lowercase() == "true")
-            .unwrap_or(false);
+        let accept_invalid_certs = match cfg.setting_str("accept_invalid_certs") {
+            Some(v) => match v.to_ascii_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(SourceError::Config(format!(
+                        "invalid `accept_invalid_certs` value `{v}`: expected true or false"
+                    )));
+                }
+            },
+            None => false,
+        };
 
         Ok(Self {
             name: cfg.name.clone(),
             url,
+            allow_insecure_http,
             username,
             password,
             api_key,
@@ -187,6 +251,13 @@ pub struct SubsonicSource {
 /// Sync, no-I/O factory registered in `SOURCE_PLUGINS` under `feature = "subsonic"`.
 pub fn subsonic_source_factory(cfg: &SourceConfig) -> Result<Box<dyn MusicSource>, SourceError> {
     let sc = SubsonicConfig::from_source_config(cfg)?;
+
+    if sc.accept_invalid_certs {
+        tracing::warn!(
+            "subsonic source '{}': TLS certificate verification disabled via accept_invalid_certs=true",
+            sc.name
+        );
+    }
 
     // Build the HTTP client first so we can set TLS options before handing it to the
     // Subsonic client, avoiding the double-construction `with_danger_accept_invalid_certs`
@@ -471,17 +542,23 @@ impl MusicSource for SubsonicSource {
 
     /// Fetch cover art from the server via `getCoverArt`. Subsonic resolves a
     /// song id to its album/track artwork. A missing/erroring art request is
-    /// treated as "no art" (`Ok(None)`) rather than a hard failure.
+    /// treated as "no art" (`Ok(None)`) rather than a hard failure, except for
+    /// auth/transport failures which are propagated.
     async fn cover_art(&self, song_id: &str) -> SourceResult<Option<Vec<u8>>> {
         match self.client.get_cover_art(song_id, None).await {
             Ok(bytes) if !bytes.is_empty() => Ok(Some(bytes.to_vec())),
             Ok(_) => Ok(None),
+            Err(SubsonicError::Api(SubsonicApiError { code: 70, .. })) => Ok(None),
             Err(e) => {
+                let mapped = map_err(e);
+                if matches!(mapped, SourceError::Auth(_) | SourceError::Unreachable(_)) {
+                    return Err(mapped);
+                }
                 tracing::debug!(
                     "subsonic source '{}': no cover art for {} ({})",
                     self.name,
                     song_id,
-                    map_err(e)
+                    mapped
                 );
                 Ok(None)
             }
@@ -556,6 +633,21 @@ mod tests {
         assert_eq!(mime_to_ext("audio/flac"), Some("flac"));
         assert_eq!(mime_to_ext("audio/mp4; codecs=\"mp4a.40.2\""), Some("m4a"));
         assert_eq!(mime_to_ext("audio/unknown"), None);
+    }
+
+    #[test]
+    fn file_ext_for_ignores_unknown_suffix() {
+        let child: opensubsonic::data::Child = serde_json::from_value(serde_json::json!({
+            "id": "abc",
+            "isDir": false,
+            "title": "Unknown Suffix",
+            "artist": "A",
+            "album": "B",
+            "suffix": "xyz"
+        }))
+        .expect("valid Child JSON");
+
+        assert_eq!(file_ext_for(&child), None);
     }
 
     // ── (a) map_song tags and audio properties ────────────────────────────────
@@ -665,7 +757,7 @@ mod tests {
         let mut settings = toml::Table::new();
         settings.insert(
             "url".to_owned(),
-            toml::Value::String("http://music.example.com".to_owned()),
+            toml::Value::String("https://music.example.com".to_owned()),
         );
         // No api_key, no username, no password.
         let cfg = make_cfg_with(settings);
@@ -696,7 +788,7 @@ mod tests {
         let mut settings = toml::Table::new();
         settings.insert(
             "url".to_owned(),
-            toml::Value::String("http://music.example.com".to_owned()),
+            toml::Value::String("https://music.example.com".to_owned()),
         );
         settings.insert(
             "api_key".to_owned(),
@@ -712,7 +804,7 @@ mod tests {
         let mut settings = toml::Table::new();
         settings.insert(
             "url".to_owned(),
-            toml::Value::String("http://music.example.com".to_owned()),
+            toml::Value::String("https://music.example.com".to_owned()),
         );
         settings.insert(
             "username".to_owned(),
@@ -732,7 +824,7 @@ mod tests {
         let mut settings = toml::Table::new();
         settings.insert(
             "url".to_owned(),
-            toml::Value::String("http://music.example.com".to_owned()),
+            toml::Value::String("https://music.example.com".to_owned()),
         );
         settings.insert(
             "username".to_owned(),
@@ -745,6 +837,91 @@ mod tests {
             matches!(result, Err(SourceError::Config(_))),
             "username without password should fail"
         );
+    }
+
+    #[test]
+    fn from_source_config_invalid_max_bitrate_returns_config_error() {
+        let mut settings = toml::Table::new();
+        settings.insert(
+            "url".to_owned(),
+            toml::Value::String("https://music.example.com".to_owned()),
+        );
+        settings.insert(
+            "api_key".to_owned(),
+            toml::Value::String("my-key".to_owned()),
+        );
+        settings.insert(
+            "max_bitrate".to_owned(),
+            toml::Value::String("fast".to_owned()),
+        );
+        let cfg = make_cfg_with(settings);
+        let result = SubsonicConfig::from_source_config(&cfg);
+        assert!(
+            matches!(result, Err(SourceError::Config(_))),
+            "invalid max_bitrate should fail"
+        );
+    }
+
+    #[test]
+    fn from_source_config_invalid_accept_invalid_certs_returns_config_error() {
+        let mut settings = toml::Table::new();
+        settings.insert(
+            "url".to_owned(),
+            toml::Value::String("https://music.example.com".to_owned()),
+        );
+        settings.insert(
+            "api_key".to_owned(),
+            toml::Value::String("my-key".to_owned()),
+        );
+        settings.insert(
+            "accept_invalid_certs".to_owned(),
+            toml::Value::String("yes".to_owned()),
+        );
+        let cfg = make_cfg_with(settings);
+        let result = SubsonicConfig::from_source_config(&cfg);
+        assert!(
+            matches!(result, Err(SourceError::Config(_))),
+            "invalid accept_invalid_certs should fail"
+        );
+    }
+
+    #[test]
+    fn from_source_config_http_requires_explicit_opt_out() {
+        let mut settings = toml::Table::new();
+        settings.insert(
+            "url".to_owned(),
+            toml::Value::String("http://music.example.com".to_owned()),
+        );
+        settings.insert(
+            "api_key".to_owned(),
+            toml::Value::String("my-key".to_owned()),
+        );
+        let cfg = make_cfg_with(settings);
+        let result = SubsonicConfig::from_source_config(&cfg);
+        assert!(
+            matches!(result, Err(SourceError::Config(_))),
+            "http url without allow_insecure_http should fail"
+        );
+    }
+
+    #[test]
+    fn from_source_config_http_allowed_when_opted_in() {
+        let mut settings = toml::Table::new();
+        settings.insert(
+            "url".to_owned(),
+            toml::Value::String("http://music.example.com".to_owned()),
+        );
+        settings.insert(
+            "api_key".to_owned(),
+            toml::Value::String("my-key".to_owned()),
+        );
+        settings.insert(
+            "allow_insecure_http".to_owned(),
+            toml::Value::String("true".to_owned()),
+        );
+        let cfg = make_cfg_with(settings);
+        let result = SubsonicConfig::from_source_config(&cfg);
+        assert!(result.is_ok(), "http url should be accepted when opted in");
     }
 
     // ── enc helper ────────────────────────────────────────────────────────────

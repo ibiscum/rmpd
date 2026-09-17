@@ -78,3 +78,38 @@ async fn sendmessage_emits_message_notification_only_when_delivered() {
         "sendmessage with no subscribers must not emit a notification"
     );
 }
+
+#[tokio::test]
+async fn sendmessage_idle_notification_is_edge_triggered() {
+    let state = AppState::new();
+    let mut conn = ConnectionState::new();
+    messaging::handle_subscribe_command(&state, &mut conn, "edgechan").await;
+
+    let mut rx = state.event_bus.subscribe();
+
+    let resp = messaging::handle_sendmessage_command(&state, "edgechan", "first").await;
+    assert!(resp.contains("OK"), "got: {resp}");
+    assert!(
+        rx.try_recv()
+            .is_ok_and(|ev| matches!(ev, Event::MessageReceived)),
+        "first message should notify idle clients"
+    );
+
+    let resp = messaging::handle_sendmessage_command(&state, "edgechan", "second").await;
+    assert!(resp.contains("OK"), "got: {resp}");
+    assert!(
+        rx.try_recv().is_err(),
+        "second message before readmessages should not notify again"
+    );
+
+    let resp = messaging::handle_readmessages_command(&state, &conn).await;
+    assert!(resp.contains("channel: edgechan"), "got: {resp}");
+
+    let resp = messaging::handle_sendmessage_command(&state, "edgechan", "third").await;
+    assert!(resp.contains("OK"), "got: {resp}");
+    assert!(
+        rx.try_recv()
+            .is_ok_and(|ev| matches!(ev, Event::MessageReceived)),
+        "after readmessages drains inbox, next message should notify again"
+    );
+}

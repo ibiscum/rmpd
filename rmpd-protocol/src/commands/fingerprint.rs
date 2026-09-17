@@ -1,5 +1,5 @@
 use super::ResponseBuilder;
-use super::utils::{ACK_ERROR_NO_EXIST, ACK_ERROR_SYS, ACK_ERROR_UNKNOWN};
+use super::utils::{ACK_ERROR_ARG, ACK_ERROR_NO_EXIST, ACK_ERROR_SYS, ACK_ERROR_UNKNOWN};
 use crate::state::AppState;
 use rmpd_library::Fingerprinter;
 use std::path::PathBuf;
@@ -17,12 +17,17 @@ pub async fn handle_getfingerprint_command(state: &AppState, uri: &str) -> Strin
     let path = match resolve_music_path(state, uri) {
         Ok(p) => p,
         Err(e) => {
-            return ResponseBuilder::error(
-                ACK_ERROR_NO_EXIST,
-                0,
-                "getfingerprint",
-                &format!("Failed to resolve URI: {e}"),
-            );
+            return match e.as_str() {
+                "Malformed path" => {
+                    ResponseBuilder::error(ACK_ERROR_ARG, 0, "getfingerprint", "Malformed path")
+                }
+                _ => ResponseBuilder::error(
+                    ACK_ERROR_NO_EXIST,
+                    0,
+                    "getfingerprint",
+                    &format!("Failed to resolve URI: {e}"),
+                ),
+            };
         }
     };
 
@@ -52,8 +57,16 @@ pub async fn handle_getfingerprint_command(state: &AppState, uri: &str) -> Strin
         }
         Ok(Err(e)) => {
             error!("fingerprinting failed: {}", e);
-            // Match MPD's error format: ACK [5@0] {} <error message>
-            ResponseBuilder::error(ACK_ERROR_UNKNOWN, 0, "", &e.to_string())
+            let msg = e.to_string();
+            if is_chromaprint_unavailable_message(&msg) {
+                return ResponseBuilder::error(
+                    ACK_ERROR_NO_EXIST,
+                    0,
+                    "getfingerprint",
+                    "chromaprint not available",
+                );
+            }
+            ResponseBuilder::error(ACK_ERROR_UNKNOWN, 0, "getfingerprint", &msg)
         }
         Err(_) => {
             error!("fingerprinting task panicked");
@@ -67,6 +80,11 @@ pub async fn handle_getfingerprint_command(state: &AppState, uri: &str) -> Strin
     }
 }
 
+fn is_chromaprint_unavailable_message(msg: &str) -> bool {
+    msg.contains("Failed to create chromaprint context")
+        || msg.contains("chromaprint not available")
+}
+
 /// Resolve a URI to an absolute file path
 fn resolve_music_path(state: &AppState, uri: &str) -> Result<PathBuf, String> {
     let music_dir = state
@@ -74,12 +92,10 @@ fn resolve_music_path(state: &AppState, uri: &str) -> Result<PathBuf, String> {
         .as_ref()
         .ok_or_else(|| "Music directory not configured".to_string())?;
 
-    // Remove leading slash if present
-    let uri = uri.strip_prefix('/').unwrap_or(uri);
-
-    // Security: Prevent path traversal attacks
-    if uri.contains("..") {
-        return Err("Path traversal not allowed".to_string());
+    // Match hardened database commands: when music_dir is configured, local
+    // paths must be MPD-safe relative URIs.
+    if uri.starts_with('/') || !rmpd_core::path::uri_safe_local(uri) {
+        return Err("Malformed path".to_string());
     }
 
     let path = PathBuf::from(music_dir).join(uri);
@@ -117,7 +133,16 @@ mod tests {
         // Should reject path traversal
         let result = resolve_music_path(&state, "../etc/passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("traversal"));
+        assert_eq!(result.unwrap_err(), "Malformed path");
+    }
+
+    #[test]
+    fn test_resolve_music_path_absolute_rejected() {
+        let state = AppState::with_paths("/tmp/db".to_string(), "/music".to_string());
+
+        let result = resolve_music_path(&state, "/etc/passwd");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Malformed path");
     }
 
     #[test]
@@ -149,5 +174,15 @@ mod tests {
         // Should return error about file not found
         assert!(response.contains("ACK"));
         assert!(response.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_getfingerprint_malformed_path_is_arg_error() {
+        let state = AppState::with_paths("/tmp/db".to_string(), "/tmp".to_string());
+
+        let response = handle_getfingerprint_command(&state, "../etc/passwd").await;
+
+        assert!(response.starts_with("ACK [2@0] {getfingerprint}"), "got: {response}");
+        assert!(response.contains("Malformed path"), "got: {response}");
     }
 }

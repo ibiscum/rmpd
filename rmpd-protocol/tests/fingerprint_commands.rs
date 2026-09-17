@@ -30,8 +30,24 @@ async fn test_getfingerprint_path_traversal_blocked() {
 
     let response = fingerprint::handle_getfingerprint_command(&state, "../etc/passwd").await;
 
-    // Should block path traversal attempts
-    assert!(response.contains("ACK"));
+    assert!(
+        response.starts_with("ACK [2@0] {getfingerprint}"),
+        "got: {response}"
+    );
+    assert!(response.contains("Malformed path"), "got: {response}");
+}
+
+#[tokio::test]
+async fn test_getfingerprint_absolute_path_blocked() {
+    let state = AppState::with_paths("/tmp/db".to_string(), "/tmp".to_string());
+
+    let response = fingerprint::handle_getfingerprint_command(&state, "/etc/passwd").await;
+
+    assert!(
+        response.starts_with("ACK [2@0] {getfingerprint}"),
+        "got: {response}"
+    );
+    assert!(response.contains("Malformed path"), "got: {response}");
 }
 
 #[tokio::test]
@@ -46,5 +62,10 @@ async fn test_getfingerprint_response_format() {
     // If successful, should have chromaprint field
     if !response.contains("ACK") {
         assert!(response.contains("chromaprint: "));
+    } else {
+        assert!(
+            response.contains("{getfingerprint}") || response.contains("{}"),
+            "got: {response}"
+        );
     }
 }
