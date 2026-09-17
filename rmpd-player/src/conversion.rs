@@ -21,24 +21,37 @@ pub fn samples_to_s16le(samples: &[f32]) -> Vec<u8> {
     buf
 }
 
-/// Clamp and scale a single f32 sample to `i16` range.
+/// Clamp and scale a single f32 sample to symmetric `i16` amplitude.
+///
+/// `-1.0` maps to `-32767` and `+1.0` maps to `+32767` (never `i16::MIN`).
+/// This keeps negative and positive full-scale magnitudes symmetric.
 #[inline]
 pub fn f32_to_i16(val: f32) -> i16 {
     (val.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
 }
 
-/// Clamp and scale a single f32 sample to `i32` range.
+/// Clamp and scale a single f32 sample to symmetric `i32` amplitude.
+///
+/// `-1.0` maps to `-2147483647` and `+1.0` maps to `+2147483647`
+/// (never `i32::MIN`) for the same symmetry reason as `f32_to_i16`.
 #[inline]
 pub fn f32_to_i32(val: f32) -> i32 {
-    (val.clamp(-1.0, 1.0) * i32::MAX as f32) as i32
+    let clamped = val.clamp(-1.0, 1.0);
+    if clamped <= -1.0 {
+        -i32::MAX
+    } else if clamped >= 1.0 {
+        i32::MAX
+    } else {
+        (clamped * i32::MAX as f32) as i32
+    }
 }
 
 /// A bounded sample buffer fed from a `SyncSender`/`Receiver` channel.
 ///
 /// Used inside cpal output callbacks to decouple the decoder thread from the
 /// real-time audio thread.  When the current buffer is exhausted the next
-/// chunk is pulled from the channel; if no data is available the buffer
-/// produces silence (the `Default` value for `T`).
+/// chunk is pulled from the channel with a non-blocking `try_recv`; if no data
+/// is immediately available the buffer produces silence (`Default` for `T`).
 pub struct SampleBuffer<T> {
     rx: Receiver<Vec<T>>,
     buffer: Vec<T>,
@@ -125,6 +138,17 @@ mod tests {
     }
 
     #[test]
+    fn float_to_int_non_finite_values() {
+        assert_eq!(f32_to_i16(f32::NAN), 0);
+        assert_eq!(f32_to_i16(f32::INFINITY), i16::MAX);
+        assert_eq!(f32_to_i16(f32::NEG_INFINITY), -i16::MAX);
+
+        assert_eq!(f32_to_i32(f32::NAN), 0);
+        assert_eq!(f32_to_i32(f32::INFINITY), i32::MAX);
+        assert_eq!(f32_to_i32(f32::NEG_INFINITY), -i32::MAX);
+    }
+
+    #[test]
     fn sample_buffer_refill() {
         let (tx, rx) = sync_channel::<Vec<f32>>(2);
         let mut buf = SampleBuffer::new(rx);
@@ -143,6 +167,19 @@ mod tests {
         let mut buf = SampleBuffer::new(rx);
 
         assert_eq!(buf.next_sample(), 0.0);
+    }
+
+    #[test]
+    fn sample_buffer_underrun_then_refill() {
+        let (tx, rx) = sync_channel::<Vec<f32>>(1);
+        let mut buf = SampleBuffer::new(rx);
+
+        // Nothing available yet: non-blocking poll returns silence.
+        assert_eq!(buf.next_sample(), 0.0);
+
+        tx.send(vec![4.0, 5.0]).unwrap();
+        assert_eq!(buf.next_sample(), 4.0);
+        assert_eq!(buf.next_sample(), 5.0);
     }
 
     #[test]

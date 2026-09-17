@@ -92,7 +92,7 @@ node_modules/
 .grepai/
 
 # Generated docs (not in version control)
-docs/
+# docs/
 DSD_PCM_CONVERSION_CHANGES.md
 
 

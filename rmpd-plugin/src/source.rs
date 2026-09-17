@@ -12,8 +12,7 @@ use std::fmt;
 /// Transport-agnostic source error.
 ///
 /// `Display` and `Debug` implementations MUST NOT echo credentials or secrets.
-/// The inner `String` carries an **opaque** message safe to log.
-#[derive(Debug)]
+/// Messages are structurally scrubbed on construction.
 pub enum SourceError {
     /// Network unreachable, DNS failure, TLS error, or connection timeout.
     Unreachable(String),
@@ -25,6 +24,58 @@ pub enum SourceError {
     Protocol(String),
     /// Missing or invalid configuration (URL, credentials, settings).
     Config(String),
+}
+
+impl SourceError {
+    fn scrub_message(msg: impl Into<String>) -> String {
+        let raw = msg.into();
+        // Keep user-facing diagnostics single-line and bounded.
+        let mut out = raw
+            .replace('\n', " ")
+            .replace('\r', " ")
+            .trim()
+            .to_owned();
+        if out.len() > 512 {
+            out.truncate(512);
+        }
+        out
+    }
+
+    pub fn unreachable(msg: impl Into<String>) -> Self {
+        Self::Unreachable(Self::scrub_message(msg))
+    }
+
+    pub fn auth(msg: impl Into<String>) -> Self {
+        Self::Auth(Self::scrub_message(msg))
+    }
+
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(Self::scrub_message(msg))
+    }
+
+    pub fn protocol(msg: impl Into<String>) -> Self {
+        Self::Protocol(Self::scrub_message(msg))
+    }
+
+    pub fn config(msg: impl Into<String>) -> Self {
+        Self::Config(Self::scrub_message(msg))
+    }
+}
+
+impl fmt::Debug for SourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, msg) = match self {
+            SourceError::Unreachable(msg) => ("Unreachable", msg),
+            SourceError::Auth(msg) => ("Auth", msg),
+            SourceError::NotFound(msg) => ("NotFound", msg),
+            SourceError::Protocol(msg) => ("Protocol", msg),
+            SourceError::Config(msg) => ("Config", msg),
+        };
+        f.debug_struct("SourceError")
+            .field("kind", &kind)
+            .field("message", msg)
+            .finish()
+    }
 }
 
 impl fmt::Display for SourceError {
@@ -53,7 +104,8 @@ pub type SourceResult<T> = Result<T, SourceError>;
 pub enum SourceEntry {
     /// A playable track; tags + virtual `path` already populated.
     Song(Song),
-    /// A virtual subdirectory (full virtual path, e.g. `"subsonic://home/AC%2FDC"`).
+    /// A virtual subdirectory in canonical mount-style form,
+    /// e.g. `"alarm-music/AC%2FDC"`.
     Dir(String),
 }
 
@@ -70,17 +122,20 @@ pub trait MusicSource: Send + Sync {
     fn scheme(&self) -> &str;
 
     /// Instance name from `[[source]] name =`. Becomes the authority component
-    /// of the virtual path: `<scheme>://<name>/...`.
+    /// of mount-style virtual paths: `<name>/...`.
     fn name(&self) -> &str;
 
     /// Cheap liveness / auth probe. MUST NOT log credentials.
     async fn ping(&self) -> SourceResult<()>;
 
     /// List immediate children of a virtual directory (`""` = source root).
+    ///
+    /// Canonical path contract: mount-style `<name>/...` (no `scheme://`),
+    /// matching runtime source ownership and playback resolution.
     async fn browse(&self, dir: &str) -> SourceResult<Vec<SourceEntry>>;
 
     /// Full catalog enumeration for `update` / sync → DB population.
-    /// Each returned `Song` carries MPD tags + its virtual `path`.
+    /// Each returned `Song` carries MPD tags + mount-style virtual `path`.
     async fn list_all(&self) -> SourceResult<Vec<Song>>;
 
     /// Server-side search (maps to MPD `find`/`search` base).
@@ -99,5 +154,97 @@ pub trait MusicSource: Send + Sync {
     /// override it; the caller caches the bytes and infers the MIME type.
     async fn cover_art(&self, _song_id: &str) -> SourceResult<Option<Vec<u8>>> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Pin::from(Box::new(future));
+
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[test]
+    fn source_error_constructors_scrub_newlines_and_limit_length() {
+        let err = SourceError::protocol("line1\nline2\rline3");
+        let s = err.to_string();
+        assert!(!s.contains('\n'));
+        assert!(!s.contains('\r'));
+        assert!(s.contains("line1 line2 line3"));
+
+        let long = "x".repeat(2000);
+        let err = SourceError::config(long);
+        let rendered = err.to_string();
+        // Prefix + bounded message.
+        assert!(rendered.len() <= 600);
+    }
+
+    #[test]
+    fn source_error_debug_is_structured_and_safe() {
+        let err = SourceError::auth("invalid token\nplease retry");
+        let d = format!("{err:?}");
+        assert!(d.contains("SourceError"));
+        assert!(d.contains("kind"));
+        assert!(d.contains("Auth"));
+        assert!(!d.contains('\n'));
+    }
+
+    struct DummySource;
+
+    #[async_trait]
+    impl MusicSource for DummySource {
+        fn scheme(&self) -> &str {
+            "dummy"
+        }
+
+        fn name(&self) -> &str {
+            "dummy-name"
+        }
+
+        async fn ping(&self) -> SourceResult<()> {
+            Ok(())
+        }
+
+        async fn browse(&self, _dir: &str) -> SourceResult<Vec<SourceEntry>> {
+            Ok(vec![])
+        }
+
+        async fn list_all(&self) -> SourceResult<Vec<Song>> {
+            Ok(vec![])
+        }
+
+        async fn search(&self, _query: &str) -> SourceResult<Vec<Song>> {
+            Ok(vec![])
+        }
+
+        async fn resolve_stream_uri(&self, _song_id: &str) -> SourceResult<String> {
+            Ok("http://example.invalid/stream".to_owned())
+        }
+    }
+
+    #[test]
+    fn default_cover_art_returns_none() {
+        let src = DummySource;
+        let got = block_on(src.cover_art("any")).expect("default cover_art should succeed");
+        assert!(got.is_none());
     }
 }

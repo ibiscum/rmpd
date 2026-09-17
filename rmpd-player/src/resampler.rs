@@ -13,6 +13,7 @@
 //! with no anti-aliasing.
 
 use rmpd_core::config::ResamplerQuality;
+use rmpd_core::error::{Result, RmpdError};
 use rubato::{
     audioadapter_buffers::direct::InterleavedSlice,
     Async, FixedAsync, Indexing, PolynomialDegree, Resampler, SincInterpolationParameters,
@@ -90,7 +91,14 @@ impl StreamResampler {
     /// Resample one block of interleaved input, returning interleaved output at
     /// the destination rate. Leftover input (less than one chunk) is carried
     /// across calls so block boundaries stay continuous.
-    pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
+    pub fn process(&mut self, input: &[f32]) -> Result<Vec<f32>> {
+        if !input.len().is_multiple_of(self.channels) {
+            return Err(RmpdError::Player(format!(
+                "resampler input is not frame-aligned: {} samples for {} channels",
+                input.len(), self.channels
+            )));
+        }
+
         self.input.extend_from_slice(input);
 
         let ch = self.channels;
@@ -109,38 +117,69 @@ impl StreamResampler {
             // inside a block so the adapters release them before we read the
             // output and drain the input below.
             let (nbr_in, nbr_out) = {
-                let in_adapter =
-                    match InterleavedSlice::new(&self.input[..chunk_samples], ch, self.chunk) {
-                        Ok(a) => a,
-                        Err(_) => break,
-                    };
+                let in_adapter = InterleavedSlice::new(&self.input[..chunk_samples], ch, self.chunk)
+                    .map_err(|e| RmpdError::Player(format!("resampler input adapter error: {e}")))?;
                 let out_cap = self.scratch.len() / ch;
-                let mut out_adapter =
-                    match InterleavedSlice::new_mut(&mut self.scratch, ch, out_cap) {
-                        Ok(a) => a,
-                        Err(_) => break,
-                    };
+                let mut out_adapter = InterleavedSlice::new_mut(&mut self.scratch, ch, out_cap)
+                    .map_err(|e| RmpdError::Player(format!("resampler output adapter error: {e}")))?;
                 match self.resampler.process_into_buffer(
                     &in_adapter,
                     &mut out_adapter,
                     Some(&indexing),
                 ) {
                     Ok(counts) => counts,
-                    Err(_) => break,
+                    Err(e) => {
+                        return Err(RmpdError::Player(format!("resampler process error: {e}")));
+                    }
                 }
             };
 
             // Guard against a pathological zero-consumption result that would
             // otherwise spin forever.
             if nbr_in == 0 {
-                break;
+                return Err(RmpdError::Player(
+                    "resampler returned zero input consumption".to_owned(),
+                ));
             }
 
             out.extend_from_slice(&self.scratch[..nbr_out * ch]);
             self.input.drain(..nbr_in * ch);
         }
 
-        out
+        Ok(out)
+    }
+
+    /// Flush pending end-of-stream samples that do not fill a full input
+    /// chunk, returning the final resampled tail.
+    pub fn flush(&mut self) -> Result<Vec<f32>> {
+        if self.input.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.input.len().is_multiple_of(self.channels) {
+            return Err(RmpdError::Player(format!(
+                "resampler internal buffer is not frame-aligned: {} samples for {} channels",
+                self.input.len(), self.channels
+            )));
+        }
+
+        let ch = self.channels;
+        let pending_frames = self.input.len() / ch;
+        let indexing = Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            active_channels_mask: None,
+            partial_len: Some(pending_frames),
+        };
+
+        let in_adapter = InterleavedSlice::new(&self.input, ch, pending_frames)
+            .map_err(|e| RmpdError::Player(format!("resampler input adapter error: {e}")))?;
+        let out = self
+            .resampler
+            .process(&in_adapter, Some(&indexing))
+            .map_err(|e| RmpdError::Player(format!("resampler flush error: {e}")))?;
+
+        self.input.clear();
+        Ok(out.take_data())
     }
 }
 
@@ -183,7 +222,7 @@ mod tests {
 
     fn frames_out(rs: &mut StreamResampler, input_frames: usize, channels: usize) -> usize {
         let input = vec![0.1f32; input_frames * channels];
-        let out = rs.process(&input);
+        let out = rs.process(&input).expect("resampler process should succeed");
         assert_eq!(out.len() % channels, 0, "output not frame-aligned");
         out.len() / channels
     }
@@ -234,5 +273,33 @@ mod tests {
         let mut rs = StreamResampler::new(88200, 48000, 1, ResamplerQuality::SincFast).unwrap();
         let got = frames_out(&mut rs, CHUNK_FRAMES * 10, 1);
         assert!(got > 0);
+    }
+
+    #[test]
+    fn process_rejects_non_frame_aligned_input() {
+        let mut rs = StreamResampler::new(44100, 48000, 2, ResamplerQuality::SincMedium).unwrap();
+        let err = rs
+            .process(&[0.1, 0.2, 0.3])
+            .err()
+            .expect("misaligned input must fail");
+        assert!(err.to_string().contains("not frame-aligned"));
+    }
+
+    #[test]
+    fn flush_emits_pending_partial_tail() {
+        let mut rs = StreamResampler::new(44_100, 48_000, 2, ResamplerQuality::SincMedium).unwrap();
+        let partial_frames = CHUNK_FRAMES / 2;
+        let input = vec![0.1f32; partial_frames * 2];
+
+        let immediate = rs.process(&input).expect("process should succeed");
+        assert!(immediate.is_empty(), "partial chunk should be buffered");
+
+        let tail = rs.flush().expect("flush should emit pending tail");
+        assert!(!tail.is_empty(), "flush should emit buffered samples");
+        assert_eq!(tail.len() % 2, 0, "tail must be frame-aligned");
+        assert!(rs.input.is_empty(), "flush should drain pending input");
+
+        let second = rs.flush().expect("second flush should succeed");
+        assert!(second.is_empty(), "second flush should have no remaining tail");
     }
 }

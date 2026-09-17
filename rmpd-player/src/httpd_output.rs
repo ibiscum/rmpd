@@ -226,6 +226,13 @@ impl AudioOutput for HttpdOutput {
     fn start(&mut self) -> Result<()> {
         use std::net::TcpListener;
 
+        // Idempotent start: keep the existing listener/thread and just reset
+        // logical pause state to match other backends.
+        if self.running.load(Ordering::Acquire) && self.accept_handle.is_some() {
+            self.pause_state.set_paused(false);
+            return Ok(());
+        }
+
         let listener = TcpListener::bind((self.addr.as_str(), self.port)).map_err(|e| {
             RmpdError::Player(format!(
                 "httpd: bind {}:{} failed: {e}",
@@ -325,13 +332,19 @@ impl AudioOutput for HttpdOutput {
                     Err(_) => break,
                 }
             }
+            running.store(false, Ordering::Release);
         });
 
         self.accept_handle = Some(handle);
+        self.pause_state.set_paused(false);
         Ok(())
     }
 
     fn write(&mut self, samples: &[f32]) -> Result<()> {
+        let started = self.running.load(Ordering::Acquire) && self.accept_handle.is_some();
+        if !started {
+            return Err(RmpdError::Player("HTTPD output not started".to_owned()));
+        }
         if self.is_paused() {
             return Ok(());
         }
@@ -639,6 +652,61 @@ mod tests {
         );
 
         output.stop().unwrap();
+    }
+
+    #[test]
+    fn write_before_start_returns_error() {
+        let mut output = make_pcm_output(0);
+        let err = output
+            .write(&[0.0_f32; 8])
+            .expect_err("write before start must fail");
+        assert!(err.to_string().contains("not started"));
+    }
+
+    #[test]
+    fn write_after_stop_returns_error() {
+        let mut output = make_pcm_output(0);
+        output.start().expect("start failed");
+        output.stop().expect("stop failed");
+
+        let err = output
+            .write(&[0.0_f32; 8])
+            .expect_err("write after stop must fail");
+        assert!(err.to_string().contains("not started"));
+    }
+
+    #[test]
+    fn start_is_idempotent_and_resets_pause_state() {
+        let mut output = make_pcm_output(0);
+        output.start().expect("start failed");
+        output.pause().expect("pause failed");
+        assert!(output.is_paused(), "output should be paused");
+
+        output
+            .start()
+            .expect("second start should be idempotent and succeed");
+        assert!(
+            !output.is_paused(),
+            "start should always reset paused state to unpaused"
+        );
+
+        output.stop().expect("stop failed");
+    }
+
+    #[test]
+    fn restart_resets_pause_state() {
+        let mut output = make_pcm_output(0);
+        output.start().expect("start failed");
+        output.pause().expect("pause failed");
+        output.stop().expect("stop failed");
+
+        output.start().expect("restart should succeed");
+        assert!(
+            !output.is_paused(),
+            "restart should reset paused state to unpaused"
+        );
+
+        output.stop().expect("stop failed");
     }
 
     #[test]

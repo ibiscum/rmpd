@@ -17,7 +17,7 @@ pub async fn handle_setvol_command(state: &AppState, volume: u8) -> String {
     match state.engine.write().await.set_volume(volume).await {
         Ok(_) => {
             let mut status = state.status.write().await;
-            status.volume = volume;
+            status.volume = volume.min(100);
             ResponseBuilder::new().ok()
         }
         Err(e) => ResponseBuilder::error(ACK_ERROR_SYS, 0, "setvol", &format!("Volume error: {e}")),

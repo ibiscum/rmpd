@@ -5,7 +5,7 @@ use crate::dop_output::DopOutput;
 use crate::output::CpalOutput;
 use parking_lot::Mutex;
 use rmpd_core::config::{DopMode, OutputConfig, ReplayGainMode, ResamplerQuality};
-use rmpd_core::error::Result;
+use rmpd_core::error::{Result, RmpdError};
 use rmpd_core::event::{Event, EventBus};
 use rmpd_core::song::Song;
 use rmpd_core::state::PlayerState;
@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 const BUFFER_SIZE: usize = 4096;
+const DOP_DROP_WARN_EVERY: u32 = 8;
 
 /// Valid DSD-to-PCM decode rates, ascending. DSD decimates cleanly only by an
 /// integer power of two, so every target is 44.1 kHz-family.
@@ -71,6 +72,53 @@ fn dsd_output_target_rate(
         None
     } else {
         Some(device_rate)
+    }
+}
+
+fn non_zero_units_per_second(rate_hz: u32, channels: u64, stream_label: &str) -> Result<u64> {
+    if rate_hz == 0 || channels == 0 {
+        return Err(RmpdError::Player(format!(
+            "invalid {stream_label} format: rate={rate_hz} channels={channels}"
+        )));
+    }
+    u64::from(rate_hz).checked_mul(channels).ok_or_else(|| {
+        RmpdError::Player(format!(
+            "{stream_label} rate/channels overflow: rate={rate_hz} channels={channels}"
+        ))
+    })
+}
+
+fn dop_setup_error_reason(err: &RmpdError) -> &'static str {
+    let msg = err.to_string();
+    if msg.contains("requires I32 output format") {
+        "format_not_i32"
+    } else if msg.contains("natively supports") {
+        "device_not_supported"
+    } else {
+        "other"
+    }
+}
+
+fn should_warn_on_dop_drops(consecutive_drops: u32) -> bool {
+    consecutive_drops >= DOP_DROP_WARN_EVERY
+        && consecutive_drops.is_multiple_of(DOP_DROP_WARN_EVERY)
+}
+
+/// Resolve native-DoP setup in the playback flow.
+///
+/// Returns `Some` when DoP setup succeeded, otherwise logs and returns `None`
+/// so playback can immediately fall back to PCM conversion.
+fn resolve_dop_setup<T>(setup: Result<T>) -> Option<T> {
+    match setup {
+        Ok(value) => Some(value),
+        Err(e) => {
+            warn!(
+                reason = dop_setup_error_reason(&e),
+                error = %e,
+                "DoP playback not available; falling back to PCM"
+            );
+            None
+        }
     }
 }
 
@@ -296,10 +344,6 @@ impl PlaybackEngine {
 
         self.playback_thread = Some(handle);
 
-        // Update atomic state (caller must update status to avoid deadlock and emit events)
-        self.atomic_state
-            .store(PlayerState::Play.to_atomic(), Ordering::Release);
-
         Ok(())
     }
 
@@ -391,8 +435,9 @@ impl PlaybackEngine {
     }
 
     pub async fn set_volume(&mut self, vol: u8) -> Result<()> {
-        self.volume.store(vol, Ordering::Release);
-        self.event_bus.emit(Event::VolumeChanged(vol));
+        let clamped = vol.min(100);
+        self.volume.store(clamped, Ordering::Release);
+        self.event_bus.emit(Event::VolumeChanged(clamped));
         Ok(())
     }
 
@@ -459,22 +504,18 @@ impl PlaybackEngine {
                 info!("DSD file detected, attempting DoP output");
                 // Release any cached PCM output so DoP can open the device.
                 output_slot.clear();
-                match Self::setup_dop(&decoder) {
-                    Ok((dop_encoder, dop_out)) => {
-                        info!("DoP output available, using native DSD playback");
-                        return Self::run_dsd_dop(
-                            decoder,
-                            dop_encoder,
-                            dop_out,
-                            atomic_state,
-                            event_bus,
-                            stop_flag,
-                            command_rx,
-                        );
-                    }
-                    Err(e) => {
-                        warn!("DoP playback not available: {}; falling back to PCM", e);
-                    }
+                if let Some((dop_encoder, dop_out)) = resolve_dop_setup(Self::setup_dop(&decoder))
+                {
+                    info!("DoP output available, using native DSD playback");
+                    return Self::run_dsd_dop(
+                        decoder,
+                        dop_encoder,
+                        dop_out,
+                        atomic_state,
+                        event_bus,
+                        stop_flag,
+                        command_rx,
+                    );
                 }
             } else {
                 info!(
@@ -510,12 +551,21 @@ impl PlaybackEngine {
             );
         }
 
-        // Standard PCM playback (works for all formats including DSD with PCM conversion)
-        let format = decoder.format();
+        // Standard PCM playback (works for all formats including DSD with PCM conversion).
+        // This probes until the first decoded frame so channel count is runtime-confirmed.
+        let format_info = decoder.format_info()?;
+        let format = rmpd_core::song::AudioFormat {
+            sample_rate: format_info.sample_rate,
+            channels: format_info.channels,
+            bits_per_sample: format_info.compatibility_bits_per_sample,
+        };
 
         debug!(
-            "decoder opened: {}Hz, {} channels",
-            format.sample_rate, format.channels
+            "decoder opened: {}Hz, {} channels (decode {}-bit, compat {}-bit)",
+            format.sample_rate,
+            format.channels,
+            format_info.decode_bits_per_sample,
+            format_info.compatibility_bits_per_sample,
         );
 
         // Build per-output boxes.  Fall back to null when no outputs configured
@@ -574,7 +624,10 @@ impl PlaybackEngine {
         // ── Playback state ────────────────────────────────────────────────────
         let mut buffer = vec![0.0f32; BUFFER_SIZE];
         let mut total_samples_played: u64 = 0;
-        let samples_per_second = format.sample_rate as u64 * format.channels as u64;
+        let samples_per_second =
+            non_zero_units_per_second(format.sample_rate, format.channels as u64, "PCM")?;
+        // Only mark Play after decoder/output startup succeeded.
+        atomic_state.store(PlayerState::Play.to_atomic(), Ordering::Release);
         // Track whether we have sent pause/resume to the workers to avoid
         // spamming the same message every 100 ms.
         let mut multi_paused = false;
@@ -661,14 +714,17 @@ impl PlaybackEngine {
                         // Claim the pre-fetched next song (destructive take —
                         // only the first crossing of cf_start ever finds a value).
                         let cf_next = next_song.lock().take().and_then(|ps| {
-                            SymphoniaDecoder::open(ps.resolved_path.as_std_path())
-                                .ok()
-                                .filter(|dec| {
-                                    !dec.is_dsd()
-                                        && dec.format().sample_rate == format.sample_rate
-                                        && dec.format().channels == format.channels
-                                })
-                                .map(|dec| (dec, ps))
+                            let mut dec = SymphoniaDecoder::open(ps.resolved_path.as_std_path())
+                                .ok()?;
+                            let dec_format = dec.format().ok()?;
+                            if !dec.is_dsd()
+                                && dec_format.sample_rate == format.sample_rate
+                                && dec_format.channels == format.channels
+                            {
+                                Some((dec, ps))
+                            } else {
+                                None
+                            }
                         });
 
                         if let Some((mut next_dec, ps)) = cf_next {
@@ -861,14 +917,16 @@ impl PlaybackEngine {
                     // pre-fed a format-compatible next song does the gapless path
                     // activate.
                     let gapless_next = next_song.lock().take().and_then(|ps| {
-                        SymphoniaDecoder::open(ps.resolved_path.as_std_path())
-                            .ok()
-                            .filter(|dec| {
-                                !dec.is_dsd()
-                                    && dec.format().sample_rate == format.sample_rate
-                                    && dec.format().channels == format.channels
-                            })
-                            .map(|dec| (dec, ps))
+                        let mut dec = SymphoniaDecoder::open(ps.resolved_path.as_std_path()).ok()?;
+                        let dec_format = dec.format().ok()?;
+                        if !dec.is_dsd()
+                            && dec_format.sample_rate == format.sample_rate
+                            && dec_format.channels == format.channels
+                        {
+                            Some((dec, ps))
+                        } else {
+                            None
+                        }
                     });
 
                     match gapless_next {
@@ -1057,7 +1115,10 @@ impl PlaybackEngine {
     /// cleanly revert to PCM instead of aborting playback.
     fn setup_dop(decoder: &SymphoniaDecoder) -> Result<(DopEncoder, DopOutput)> {
         let dsd_sample_rate = decoder.sample_rate();
-        let channels = decoder.channels();
+        let channels = decoder
+            .declared_channels()
+            .or(decoder.channels())
+            .ok_or_else(|| RmpdError::Player("DSD channel count unavailable".to_owned()))?;
         let channel_layout = decoder
             .channel_data_layout()
             .unwrap_or(symphonia::core::codecs::audio::ChannelDataLayout::Planar);
@@ -1103,15 +1164,26 @@ impl PlaybackEngine {
         command_rx: mpsc::Receiver<PlaybackCommand>,
     ) -> Result<()> {
         let dsd_sample_rate = decoder.sample_rate();
-        let channels = decoder.channels();
+        let channels = decoder
+            .declared_channels()
+            .or(decoder.channels())
+            .ok_or_else(|| RmpdError::Player("DSD channel count unavailable".to_owned()))?;
 
         let mut dsd_buffer = Vec::new();
         let mut dop_i32_buffer = Vec::new();
         let mut total_dsd_bytes: u64 = 0;
-        let dsd_bytes_per_second = (dsd_sample_rate / 8) as u64 * channels as u64;
+        let dsd_bytes_per_second = non_zero_units_per_second(
+            dsd_sample_rate / 8,
+            channels as u64,
+            "DSD",
+        )?;
+        // DoP startup is complete when this loop is entered.
+        atomic_state.store(PlayerState::Play.to_atomic(), Ordering::Release);
         // Track whether pause() has been called so we only call it once on
         // entry (matching the multi_paused pattern in the PCM path).
         let mut dsd_paused = false;
+        let mut consecutive_dop_drops: u32 = 0;
+        let mut total_dop_drops: u64 = 0;
 
         while !stop_flag.load(Ordering::Acquire) {
             // Check for commands
@@ -1159,7 +1231,21 @@ impl PlaybackEngine {
             dop_encoder.encode(&dsd_buffer, &mut dop_i32_buffer);
 
             // Write DoP samples (i32 to preserve marker precision)
-            output.write(&dop_i32_buffer)?;
+            let written = output.write(&dop_i32_buffer)?;
+            if written == 0 {
+                consecutive_dop_drops = consecutive_dop_drops.saturating_add(1);
+                total_dop_drops = total_dop_drops.saturating_add(1);
+                if should_warn_on_dop_drops(consecutive_dop_drops) {
+                    warn!(
+                        metric = "rmpd.engine.dop_write_drops",
+                        consecutive = consecutive_dop_drops,
+                        total = total_dop_drops,
+                        "DoP write dropped at engine boundary"
+                    );
+                }
+                continue;
+            }
+            consecutive_dop_drops = 0;
 
             // Update elapsed time
             total_dsd_bytes += bytes_read as u64;
@@ -1272,5 +1358,92 @@ mod tests {
         // should still decode to 88200 Hz; only the cpal stream opens at 48000.
         let rate = select_dsd_pcm_rate(48000, |r| r == 88200);
         assert_eq!(rate, 88200);
+    }
+
+    #[test]
+    fn dop_setup_non_i32_error_falls_back_to_pcm() {
+        let setup = Err(RmpdError::Player(
+            "DoP requires I32 output format, got I24".to_owned(),
+        ));
+        let resolved = resolve_dop_setup::<(DopEncoder, DopOutput)>(setup);
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn dop_setup_success_keeps_native_dop_path() {
+        let resolved = resolve_dop_setup::<u32>(Ok(42));
+        assert_eq!(resolved, Some(42));
+    }
+
+    #[test]
+    fn non_zero_units_per_second_rejects_zero_values() {
+        assert!(non_zero_units_per_second(0, 2, "PCM").is_err());
+        assert!(non_zero_units_per_second(44100, 0, "PCM").is_err());
+    }
+
+    #[test]
+    fn non_zero_units_per_second_detects_overflow() {
+        let err = non_zero_units_per_second(u32::MAX, u64::MAX, "PCM")
+            .err()
+            .expect("overflow must return an error");
+        assert!(err.to_string().contains("overflow"));
+    }
+
+    #[test]
+    fn non_zero_units_per_second_computes_valid_value() {
+        assert_eq!(non_zero_units_per_second(48000, 2, "PCM").unwrap(), 96000);
+    }
+
+    #[test]
+    fn dop_setup_error_reason_is_classified() {
+        assert_eq!(
+            dop_setup_error_reason(&RmpdError::Player(
+                "DoP requires I32 output format, got I24".to_owned()
+            )),
+            "format_not_i32"
+        );
+        assert_eq!(
+            dop_setup_error_reason(&RmpdError::Player(
+                "no USB/hardware DAC natively supports 176400 Hz".to_owned()
+            )),
+            "device_not_supported"
+        );
+        assert_eq!(
+            dop_setup_error_reason(&RmpdError::Player("something else".to_owned())),
+            "other"
+        );
+    }
+
+    #[test]
+    fn dop_drop_warning_cadence_is_every_n() {
+        assert!(!should_warn_on_dop_drops(0));
+        assert!(!should_warn_on_dop_drops(1));
+        assert!(!should_warn_on_dop_drops(7));
+        assert!(should_warn_on_dop_drops(8));
+        assert!(!should_warn_on_dop_drops(9));
+        assert!(should_warn_on_dop_drops(16));
+    }
+
+    #[test]
+    fn set_volume_clamps_above_100() {
+        let event_bus = EventBus::new();
+        let status = Arc::new(RwLock::new(rmpd_core::state::PlayerStatus::default()));
+        let atomic_state = Arc::new(AtomicU8::new(PlayerState::Stop.to_atomic()));
+        let mut engine = PlaybackEngine::new(event_bus, status, atomic_state);
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime should build");
+        rt.block_on(async {
+            engine
+                .set_volume(200)
+                .await
+                .expect("set_volume should succeed");
+            assert_eq!(engine.get_volume().await, 100);
+
+            engine
+                .set_volume(80)
+                .await
+                .expect("set_volume should succeed");
+            assert_eq!(engine.get_volume().await, 80);
+        });
     }
 }

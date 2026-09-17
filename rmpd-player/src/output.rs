@@ -20,6 +20,28 @@ pub struct CpalOutput {
     buffer_time_ms: u32,
 }
 
+fn validate_started_state(has_stream: bool, has_sender: bool) -> Result<()> {
+    match (has_stream, has_sender) {
+        (true, true) => Ok(()),
+        (false, false) => Err(RmpdError::Player("Output not started".to_owned())),
+        _ => Err(RmpdError::Player(
+            "Output internal state invalid (partially started)".to_owned(),
+        )),
+    }
+}
+
+fn channel_depth_for(buffer_time_ms: u32, sample_rate: u32, channels: u16) -> usize {
+    // Compute channel depth from buffer_time_ms. Each chunk sent over the
+    // channel holds ~4096 interleaved samples (engine BUFFER_SIZE).
+    const SAMPLES_PER_CHUNK: u64 = 4096;
+    if buffer_time_ms == 0 {
+        return 32; // safe default if somehow zero
+    }
+    let samples_needed =
+        (buffer_time_ms as u64 * sample_rate as u64 * channels as u64) / 1000;
+    samples_needed.div_ceil(SAMPLES_PER_CHUNK).max(4) as usize
+}
+
 impl CpalOutput {
     pub fn new(
         format: AudioFormat,
@@ -132,8 +154,21 @@ impl CpalOutput {
     }
 
     pub fn start(&mut self) -> Result<()> {
-        if self.stream.is_some() {
-            return Ok(());
+        if self.stream.is_some() || self.sample_sender.is_some() {
+            match validate_started_state(self.stream.is_some(), self.sample_sender.is_some()) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(
+                        "output had inconsistent start state (stream={}, sender={}): {}; rebuilding",
+                        self.stream.is_some(),
+                        self.sample_sender.is_some(),
+                        e
+                    );
+                    self.stream = None;
+                    self.sample_sender = None;
+                    self.pause_state.set_paused(false);
+                }
+            }
         }
 
         let mut device_config = CpalDeviceConfig {
@@ -143,21 +178,8 @@ impl CpalOutput {
         };
         let sample_format = device_config.find_pcm_format()?;
 
-        // Compute channel depth from buffer_time_ms.  Each chunk sent over the
-        // channel holds ~4096 samples across all channels (the engine's decode
-        // loop writes BUFFER_SIZE = 4096 samples per iteration).  We divide the
-        // desired buffer by the chunk size and clamp to a minimum of 4 so the
-        // device callback never starves on a cold start.
-        const SAMPLES_PER_CHUNK: u64 = 4096;
-        let channel_depth = if self.buffer_time_ms == 0 {
-            32 // safe default if somehow zero
-        } else {
-            let samples_needed = (self.buffer_time_ms as u64
-                * self.config.sample_rate as u64
-                * self.config.channels as u64)
-                / 1000;
-            samples_needed.div_ceil(SAMPLES_PER_CHUNK).max(4) as usize
-        };
+        let channel_depth =
+            channel_depth_for(self.buffer_time_ms, self.config.sample_rate, self.config.channels);
         let (tx, rx) = sync_channel::<Vec<f32>>(channel_depth);
 
         let stream = match sample_format {
@@ -238,13 +260,14 @@ impl CpalOutput {
     }
 
     pub fn write(&mut self, samples: &[f32]) -> Result<usize> {
+        validate_started_state(self.stream.is_some(), self.sample_sender.is_some())?;
         if self.pause_state.is_paused() {
             return Ok(0);
         }
 
         // Resample to the device rate when required (bridges unsupported rates).
         let out = match self.resampler {
-            Some(ref mut rs) => rs.process(samples),
+            Some(ref mut rs) => rs.process(samples)?,
             None => samples.to_vec(),
         };
         let n = out.len();
@@ -258,11 +281,14 @@ impl CpalOutput {
                 }
                 Ok(n)
             }
-            None => Err(RmpdError::Player("Output not started".to_owned())),
+            None => Err(RmpdError::Player(
+                "Output internal state invalid (missing sender)".to_owned(),
+            )),
         }
     }
 
     pub fn pause(&mut self) -> Result<()> {
+        validate_started_state(self.stream.is_some(), self.sample_sender.is_some())?;
         if let Some(ref stream) = self.stream {
             stream
                 .pause()
@@ -273,6 +299,7 @@ impl CpalOutput {
     }
 
     pub fn resume(&mut self) -> Result<()> {
+        validate_started_state(self.stream.is_some(), self.sample_sender.is_some())?;
         if let Some(ref stream) = self.stream {
             stream
                 .play()
@@ -283,6 +310,15 @@ impl CpalOutput {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        if let Some(ref mut rs) = self.resampler {
+            let tail = rs.flush()?;
+            if !tail.is_empty() && let Some(ref sender) = self.sample_sender {
+                sender.send(tail).map_err(|_| {
+                    RmpdError::Player("Failed to send flushed samples to output".to_owned())
+                })?;
+            }
+        }
+
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }
@@ -326,5 +362,93 @@ impl AudioOutput for CpalOutput {
     }
     fn is_paused(&self) -> bool {
         CpalOutput::is_paused(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{channel_depth_for, validate_started_state};
+    use crate::cpal_utils::set_output_device;
+    use crate::output::CpalOutput;
+    use rmpd_core::config::ResamplerQuality;
+    use rmpd_core::song::AudioFormat;
+
+    #[test]
+    fn started_state_validation_is_strict() {
+        assert!(validate_started_state(true, true).is_ok());
+
+        let not_started = validate_started_state(false, false)
+            .err()
+            .expect("false/false should be not started");
+        assert!(not_started.to_string().contains("not started"));
+
+        let partial_a = validate_started_state(true, false)
+            .err()
+            .expect("true/false should be invalid");
+        assert!(partial_a.to_string().contains("partially started"));
+
+        let partial_b = validate_started_state(false, true)
+            .err()
+            .expect("false/true should be invalid");
+        assert!(partial_b.to_string().contains("partially started"));
+    }
+
+    #[test]
+    fn channel_depth_respects_defaults_and_minimums() {
+        assert_eq!(channel_depth_for(0, 48_000, 2), 32);
+        assert_eq!(channel_depth_for(1, 48_000, 2), 4);
+        assert_eq!(channel_depth_for(500, 48_000, 2), 12);
+        assert_eq!(channel_depth_for(1000, 44_100, 2), 22);
+    }
+
+    #[test]
+    fn cpal_e2e_via_pulse_virtual_sink_opt_in() {
+        if std::env::var("RMPD_E2E_AUDIO_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        set_output_device(Some("pulse".to_owned()));
+
+        let format = AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 16,
+        };
+
+        let run = || -> Result<(), String> {
+            let mut out = CpalOutput::new(format, ResamplerQuality::default(), 100)
+                .map_err(|e| format!("construct output: {e}"))?;
+
+            out.start().map_err(|e| format!("start: {e}"))?;
+
+            let samples = vec![0.0_f32; 4096];
+            let written = out
+                .write(&samples)
+                .map_err(|e| format!("write while started: {e}"))?;
+            if written != samples.len() {
+                return Err(format!(
+                    "unexpected write size: got {written}, expected {}",
+                    samples.len()
+                ));
+            }
+
+            out.stop().map_err(|e| format!("stop: {e}"))?;
+
+            let stopped_err = out
+                .write(&samples)
+                .err()
+                .ok_or_else(|| "write after stop unexpectedly succeeded".to_owned())?;
+            if !stopped_err.to_string().to_ascii_lowercase().contains("not started") {
+                return Err(format!("unexpected post-stop error: {stopped_err}"));
+            }
+
+            Ok(())
+        }();
+
+        set_output_device(None);
+
+        if let Err(msg) = run {
+            panic!("{msg}");
+        }
     }
 }

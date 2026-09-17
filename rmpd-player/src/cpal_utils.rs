@@ -3,9 +3,13 @@ use cpal::{Device, SampleFormat, SampleRate, StreamConfig};
 use rmpd_core::error::{Result, RmpdError};
 use std::sync::RwLock;
 
-/// Output device id configured at startup (from `audio.device`). Takes
+/// Output device id configured at startup (from `audio.device`). This takes
 /// precedence over the `RMPD_AUDIO_DEVICE` env var.
 static OUTPUT_DEVICE: RwLock<Option<String>> = RwLock::new(None);
+
+fn dop_format_preferences() -> &'static [SampleFormat] {
+    &[SampleFormat::I32]
+}
 
 /// Set the preferred output device id (ALSA PCM name, e.g. `hw:CARD=1,DEV=0`)
 /// from configuration. `None`/empty selects the system default device.
@@ -18,8 +22,8 @@ pub fn set_output_device(device: Option<String>) {
     }
 }
 
-/// The configured output device id: the config value first, then the
-/// `RMPD_AUDIO_DEVICE` env override.
+/// The configured output device id: `[audio].device` first, then the
+/// `RMPD_AUDIO_DEVICE` env fallback.
 fn configured_device() -> Option<String> {
     if let Some(dev) = OUTPUT_DEVICE.read().ok().and_then(|g| g.clone()) {
         return Some(dev);
@@ -65,6 +69,37 @@ fn normalize_alsa(name: &str) -> Option<String> {
     None
 }
 
+/// Pick the preferred matching device index for `want` from `(id, desc)`
+/// metadata, using this precedence:
+/// 1) exact id
+/// 2) exact ALSA-normalized id (`hw:1,0` -> `hw:CARD=1,DEV=0`)
+/// 3) exact description
+/// 4) case-insensitive id substring
+/// 5) case-insensitive description substring
+fn pick_device_index(devices: &[(String, String)], want: &str) -> Option<usize> {
+    let lower = want.to_lowercase();
+    let norm = normalize_alsa(want);
+
+    devices
+        .iter()
+        .position(|(id, _)| id == want)
+        .or_else(|| {
+            norm.as_deref()
+                .and_then(|n| devices.iter().position(|(id, _)| id == n))
+        })
+        .or_else(|| devices.iter().position(|(_, desc)| desc == want))
+        .or_else(|| {
+            devices
+                .iter()
+                .position(|(id, _)| id.to_lowercase().contains(&lower))
+        })
+        .or_else(|| {
+            devices
+                .iter()
+                .position(|(_, desc)| desc.to_lowercase().contains(&lower))
+        })
+}
+
 /// CPAL device configuration helper
 pub struct CpalDeviceConfig {
     pub device: Device,
@@ -72,7 +107,8 @@ pub struct CpalDeviceConfig {
     pub sample_format: SampleFormat,
 }
 
-/// Resolve the output device, honoring the `RMPD_AUDIO_DEVICE` override.
+/// Resolve the effective output device from config/env preference, falling
+/// back to CPAL's default output device when no configured match is found.
 ///
 /// When the env var is set, select the output device whose **id** (the ALSA PCM
 /// name, e.g. `hw:CARD=1,DEV=0`) or description matches it — exact match first,
@@ -103,29 +139,14 @@ fn resolve_output_device(host: &cpal::Host) -> Result<Device> {
     }
 
     if let Some(want) = configured_device() {
-        let want = want.as_str();
-        // 1) exact id, 2) exact desc, 3) substring id, 4) substring desc
-        let lower = want.to_lowercase();
-        let norm = normalize_alsa(want);
-        let pick = devices
-            .iter()
-            .find(|(_, id, _)| id == want)
-            .or_else(|| {
-                norm.as_deref()
-                    .and_then(|n| devices.iter().find(|(_, id, _)| id == n))
-            })
-            .or_else(|| devices.iter().find(|(_, _, desc)| desc == want))
-            .or_else(|| {
-                devices
-                    .iter()
-                    .find(|(_, id, _)| id.to_lowercase().contains(&lower))
-            })
-            .or_else(|| {
-                devices
-                    .iter()
-                    .find(|(_, _, desc)| desc.to_lowercase().contains(&lower))
-            });
-        if let Some((dev, id, desc)) = pick {
+        if let Some(i) = pick_device_index(
+            &devices
+                .iter()
+                .map(|(_, id, desc)| (id.clone(), desc.clone()))
+                .collect::<Vec<_>>(),
+            &want,
+        ) {
+            let (dev, id, desc) = &devices[i];
             tracing::info!("using output device id='{id}' desc='{desc}' (configured '{want}')");
             return Ok(dev.clone());
         }
@@ -231,10 +252,9 @@ impl CpalDeviceConfig {
     }
 
     /// Device configuration for DoP/native DSD at the **exact** `sample_rate`
-    /// (no resampling). Auto-selects a bit-perfect `hw:` DAC that natively
-    /// supports the rate (`find_dop_device`), preferring an explicitly
-    /// configured device when it qualifies, and falling back to the resolved
-    /// device otherwise (DoP then likely fails and the caller reverts to PCM).
+    /// (no resampling). If a device is explicitly configured, it is used
+    /// verbatim (no substitution). Otherwise this auto-selects a bit-perfect
+    /// `hw:` DAC that natively supports the rate (`find_dop_device`).
     pub fn new_dop(sample_rate: SampleRate, channels: u16) -> Result<Self> {
         let host = cpal::default_host();
         // An explicitly configured device is used verbatim (no auto-substitution),
@@ -300,8 +320,9 @@ impl CpalDeviceConfig {
             .unwrap_or(false)
     }
 
-    /// Whether the default output device natively supports `rate` (no
-    /// resampling required). Used to prefer bit-exact rates.
+    /// Whether the effective output device (configured/env-selected if set,
+    /// otherwise CPAL default) natively supports `rate` (no resampling
+    /// required). Used to prefer bit-exact rates.
     pub fn default_device_supports_rate(rate: SampleRate) -> bool {
         let host = cpal::default_host();
         resolve_output_device(&host)
@@ -309,9 +330,10 @@ impl CpalDeviceConfig {
             .unwrap_or(false)
     }
 
-    /// The default output device's preferred (default) sample rate in Hz, if
-    /// known. Used to size DSD-to-PCM decoding to the device instead of to the
-    /// (often huge) advertised maximum.
+    /// The effective output device's preferred sample rate in Hz, if known.
+    /// Uses the configured/env-selected device when set; otherwise CPAL's
+    /// default output device. Used to size DSD-to-PCM decoding to the device
+    /// instead of to the (often huge) advertised maximum.
     pub fn default_output_rate() -> Option<SampleRate> {
         let host = cpal::default_host();
         resolve_output_device(&host)
@@ -366,10 +388,12 @@ impl CpalDeviceConfig {
         self.find_format_with_preference(preferences, "PCM")
     }
 
-    /// Find the best DoP format (prefers I24, then I32)
+    /// Find the best DoP format.
+    ///
+    /// Currently restricted to I32 only: the DoP callback path is implemented
+    /// for `&mut [i32]` and must remain bit-exact.
     pub fn find_dop_format(&mut self) -> Result<SampleFormat> {
-        let preferences = &[SampleFormat::I24, SampleFormat::I32];
-        self.find_format_with_preference(preferences, "DoP")
+        self.find_format_with_preference(dop_format_preferences(), "DoP")
     }
 
     /// Find format matching the given preferences, always choosing the
@@ -427,10 +451,65 @@ impl CpalDeviceConfig {
             }
         }
 
-        let format = found_format.unwrap_or(preferences[0]);
+        let Some(format) = found_format else {
+            return Err(RmpdError::Player(format!(
+                "no supported {format_type} sample format at {} Hz",
+                self.config.sample_rate
+            )));
+        };
         tracing::debug!("using {} sample format: {:?}", format_type, format);
 
         self.sample_format = format;
         Ok(format)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dop_format_preferences, normalize_alsa, pick_device_index};
+    use cpal::SampleFormat;
+
+    #[test]
+    fn dop_preferences_are_i32_only() {
+        let prefs = dop_format_preferences();
+        assert_eq!(prefs, &[SampleFormat::I32]);
+        assert!(!prefs.contains(&SampleFormat::I24));
+        assert!(!prefs.contains(&SampleFormat::F32));
+    }
+
+    #[test]
+    fn normalize_alsa_numeric_shorthand() {
+        assert_eq!(
+            normalize_alsa("hw:1,0").as_deref(),
+            Some("hw:CARD=1,DEV=0")
+        );
+        assert_eq!(normalize_alsa("hw:2").as_deref(), Some("hw:CARD=2,DEV=0"));
+        assert_eq!(
+            normalize_alsa("plughw:3,4").as_deref(),
+            Some("plughw:CARD=3,DEV=4")
+        );
+    }
+
+    #[test]
+    fn normalize_alsa_rejects_non_numeric_or_canonical() {
+        assert_eq!(normalize_alsa("hw:CARD=1,DEV=0"), None);
+        assert_eq!(normalize_alsa("hw:PCH,0"), None);
+        assert_eq!(normalize_alsa("default"), None);
+    }
+
+    #[test]
+    fn pick_device_match_precedence() {
+        let devices = vec![
+            ("hw:CARD=2,DEV=0".to_owned(), "DAC Two".to_owned()),
+            ("hw:CARD=1,DEV=0".to_owned(), "USB DAC One".to_owned()),
+            ("pulse".to_owned(), "Built-in Audio Analog Stereo".to_owned()),
+        ];
+
+        assert_eq!(pick_device_index(&devices, "hw:CARD=1,DEV=0"), Some(1));
+        assert_eq!(pick_device_index(&devices, "hw:1,0"), Some(1));
+        assert_eq!(pick_device_index(&devices, "DAC Two"), Some(0));
+        assert_eq!(pick_device_index(&devices, "usb"), Some(1));
+        assert_eq!(pick_device_index(&devices, "analog"), Some(2));
+        assert_eq!(pick_device_index(&devices, "does-not-exist"), None);
     }
 }

@@ -38,9 +38,14 @@ pub fn linear_gains(progress: f32) -> (f32, f32) {
 
 /// Number of interleaved f32 samples in a `seconds`-long window for the given
 /// stream geometry (`sample_rate` Hz, `channels` channels).
+///
+/// Uses saturating integer arithmetic: excessively large inputs clamp to
+/// `usize::MAX` instead of wrapping.
 #[must_use]
 pub fn crossfade_window_samples(sample_rate: u32, channels: u8, seconds: u32) -> usize {
-    sample_rate as usize * channels as usize * seconds as usize
+    (sample_rate as usize)
+        .saturating_mul(channels as usize)
+        .saturating_mul(seconds as usize)
 }
 
 /// Mix `src` into `dest` in place with per-stream gains:
@@ -82,9 +87,18 @@ pub fn mixramp_interpolate(ramp_list: &str, required_db: f32) -> Option<f32> {
         if entry.is_empty() {
             continue;
         }
-        let (db_str, dur_str) = entry.split_once(' ')?;
+        let mut parts = entry.split_whitespace();
+        let db_str = parts.next()?;
+        let dur_str = parts.next()?;
+        // Exactly two fields per entry: "<db> <sec>".
+        if parts.next().is_some() {
+            return None;
+        }
         let db: f32 = db_str.trim().parse().ok()?;
         let dur: f32 = dur_str.trim().parse().ok()?;
+        if dur < 0.0 {
+            return None;
+        }
 
         if db == required_db {
             return Some(dur);
@@ -138,9 +152,13 @@ pub fn mixramp_overlap_seconds(
 }
 
 /// Interleaved-sample count for a fractional-seconds window.
+///
+/// Rounds toward zero (truncates the fractional part) and clamps negatives to
+/// 0. Uses saturating float bounds before integer conversion.
 #[must_use]
 pub fn window_samples_secs(sample_rate: u32, channels: u8, seconds: f32) -> usize {
-    ((sample_rate as f32 * channels as f32 * seconds).max(0.0)) as usize
+    let n = (sample_rate as f32 * channels as f32 * seconds).max(0.0);
+    n.min(usize::MAX as f32) as usize
 }
 
 #[cfg(test)]
@@ -188,6 +206,14 @@ mod tests {
         // 2 s of 44.1 kHz stereo = 44100 * 2 * 2.
         assert_eq!(crossfade_window_samples(44100, 2, 2), 176_400);
         assert_eq!(crossfade_window_samples(48000, 1, 0), 0);
+    }
+
+    #[test]
+    fn window_sample_count_saturates_on_extreme_inputs() {
+        assert_eq!(
+            crossfade_window_samples(u32::MAX, u8::MAX, u32::MAX),
+            usize::MAX
+        );
     }
 
     #[test]
@@ -246,6 +272,17 @@ mod tests {
     }
 
     #[test]
+    fn mixramp_whitespace_variants_parse() {
+        assert_eq!(mixramp_interpolate("-10\t1.0;-5 2.0", -10.0), Some(1.0));
+        assert_eq!(mixramp_interpolate("-10   1.0;-5\t2.0", -5.0), Some(2.0));
+    }
+
+    #[test]
+    fn mixramp_negative_duration_returns_none() {
+        assert_eq!(mixramp_interpolate("-10 -1.0;-5 2.0", -7.0), None);
+    }
+
+    #[test]
     fn mixramp_empty_list_returns_none() {
         assert_eq!(mixramp_interpolate("", -5.0), None);
         assert_eq!(mixramp_interpolate(";;;", -5.0), None);
@@ -296,5 +333,18 @@ mod tests {
         assert_eq!(window_samples_secs(44100, 2, 0.5), 44100);
         // Negative seconds → 0
         assert_eq!(window_samples_secs(44100, 2, -1.0), 0);
+        // Truncates toward zero.
+        assert_eq!(window_samples_secs(10, 1, 0.19), 1);
+        assert_eq!(window_samples_secs(10, 1, 0.11), 1);
+        assert_eq!(window_samples_secs(10, 1, 0.09), 0);
+    }
+
+    #[test]
+    fn mix_into_non_finite_inputs_propagate() {
+        let mut dest = [1.0f32, 1.0];
+        let src = [f32::NAN, f32::INFINITY];
+        mix_into(&mut dest, &src, 1.0, 1.0);
+        assert!(dest[0].is_nan());
+        assert!(dest[1].is_infinite() && dest[1].is_sign_positive());
     }
 }

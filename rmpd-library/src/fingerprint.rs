@@ -84,9 +84,10 @@ impl Fingerprinter {
         // Open audio file with Symphonia decoder
         let mut decoder = SymphoniaDecoder::open(path)?;
 
-        // Get audio format info
-        let sample_rate = decoder.sample_rate();
-        let channels = decoder.channels();
+        // Get runtime-confirmed format info (channels are unknown until first frame).
+        let format_info = decoder.format_info()?;
+        let sample_rate = format_info.sample_rate;
+        let channels = format_info.channels;
         let sample_rate_i32 = to_i32_u32(sample_rate, "sample_rate")?;
         let channels_i32 = to_i32_u32(u32::from(channels), "channels")?;
 

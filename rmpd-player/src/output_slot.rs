@@ -55,16 +55,29 @@ impl OutputSlot {
         key: OutputKey,
         build: impl FnOnce() -> Result<Arc<MultiOutput>>,
     ) -> Result<Arc<MultiOutput>> {
+        {
+            let guard = self.inner.lock();
+            if let Some(cached) = guard.as_ref()
+                && cached.key == key
+            {
+                return Ok(cached.multi.clone());
+            }
+        }
+
+        // Miss: build outside the lock. Opening outputs can block for a while,
+        // and a failed build must not discard the currently cached output.
+        let multi = build()?;
+
         let mut guard = self.inner.lock();
         if let Some(cached) = guard.as_ref()
             && cached.key == key
         {
             return Ok(cached.multi.clone());
         }
-        // Miss: drop the old output first (its `Drop` joins the workers and
-        // closes the device) so the new device opens cleanly, then build.
-        *guard = None;
-        let multi = build()?;
+
+        // Replace the cached output only after a successful build. Dropping
+        // the previous Arc may stop/detach worker threads depending on backend
+        // behavior; device close timing is backend-dependent.
         *guard = Some(Cached {
             key,
             multi: multi.clone(),
@@ -88,6 +101,7 @@ impl OutputSlot {
 mod tests {
     use super::*;
     use crate::null_output::NullOutput;
+    use rmpd_core::error::RmpdError;
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     fn build_null() -> Result<Arc<MultiOutput>> {
@@ -200,6 +214,45 @@ mod tests {
             builds.load(Ordering::SeqCst),
             2,
             "clear (e.g. on stop or DoP) must force a rebuild"
+        );
+    }
+
+    #[test]
+    fn failed_rebuild_keeps_previous_cache() {
+        let slot = OutputSlot::new();
+        let builds = AtomicUsize::new(0);
+
+        let first = slot
+            .acquire(key(44100, "null|Out"), || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                build_null()
+            })
+            .unwrap();
+
+        let err = slot
+            .acquire(key(96000, "null|Out"), || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Err(RmpdError::Player("simulated build failure".to_owned()))
+            })
+            .err()
+            .expect("rebuild should fail");
+        assert!(err.to_string().contains("simulated build failure"));
+        assert!(slot.is_cached(), "failed rebuild must keep previous cache");
+
+        let reused = slot
+            .acquire(key(44100, "null|Out"), || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                build_null()
+            })
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &reused),
+            "cache entry from before failure should still be reused"
+        );
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "same-key re-acquire after failed rebuild must not rebuild"
         );
     }
 }

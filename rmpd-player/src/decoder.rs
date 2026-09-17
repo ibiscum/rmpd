@@ -22,6 +22,7 @@ pub struct SymphoniaDecoder {
     track_id: u32,
     codec_id: AudioCodecId,
     sample_rate: u32,
+    declared_channels: Option<u8>,
     channels: Option<u8>,
     total_duration: Option<f64>,
     sample_buf: Vec<f32>,
@@ -33,6 +34,16 @@ pub struct SymphoniaDecoder {
     uses_pcm_conversion: bool,
     /// ICY "now playing" title handle when decoding a remote stream.
     stream_title: Option<rmpd_stream::TitleHandle>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DecoderFormatInfo {
+    pub sample_rate: u32,
+    pub channels: u8,
+    /// Decoder output precision (Symphonia audio path is f32 samples).
+    pub decode_bits_per_sample: u8,
+    /// MPD-compatibility reporting bit depth for external format signaling.
+    pub compatibility_bits_per_sample: u8,
 }
 
 impl SymphoniaDecoder {
@@ -89,8 +100,9 @@ impl SymphoniaDecoder {
             .sample_rate
             .ok_or_else(|| RmpdError::Player("Sample rate not available".to_owned()))?;
 
-        // Channels might not be available until after decoding starts.
-        let channels = audio.channels.as_ref().map(|ch| ch.count() as u8);
+        // Keep declared channels separately. Runtime channel count is treated as
+        // unknown until the first decoded frame arrives.
+        let declared_channels = audio.channels.as_ref().map(|ch| ch.count() as u8);
 
         // DSD metadata if available.
         let channel_data_layout = audio.channel_data_layout;
@@ -116,7 +128,8 @@ impl SymphoniaDecoder {
             track_id,
             codec_id,
             sample_rate,
-            channels,
+            declared_channels,
+            channels: None,
             total_duration,
             sample_buf: Vec::new(),
             sample_pos: 0,
@@ -196,6 +209,74 @@ impl SymphoniaDecoder {
         self.uses_pcm_conversion = true;
 
         Ok(())
+    }
+
+    /// Declared channel count from container/codec metadata, if present.
+    /// This is not considered runtime-confirmed until at least one frame is decoded.
+    pub fn declared_channels(&self) -> Option<u8> {
+        self.declared_channels
+    }
+
+    fn ensure_channels_from_first_frame(&mut self) -> Result<()> {
+        if self.channels.is_some() {
+            return Ok(());
+        }
+
+        loop {
+            let packet = match self.reader.next_packet() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => {
+                    return Err(RmpdError::Player(
+                        "Channel count unavailable: no decodable audio frame".to_owned(),
+                    ));
+                }
+                Err(SymphoniaError::ResetRequired) => {
+                    self.decoder.reset();
+                    continue;
+                }
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Err(RmpdError::Player(
+                        "Channel count unavailable: unexpected end of stream".to_owned(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(RmpdError::Player(format!(
+                        "Failed to read packet while probing channels: {e}"
+                    )));
+                }
+            };
+
+            if packet.track_id != self.track_id {
+                continue;
+            }
+
+            let decoded = match self.decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(e) => {
+                    return Err(RmpdError::Player(format!(
+                        "Failed to decode packet while probing channels: {e}"
+                    )));
+                }
+            };
+
+            if self.uses_pcm_conversion && !matches!(decoded, GenericAudioBufferRef::F32(_)) {
+                return Err(RmpdError::Player(
+                    "DSD decoder returned wrong sample format".to_owned(),
+                ));
+            }
+
+            if decoded.frames() == 0 {
+                continue;
+            }
+
+            self.channels = Some(decoded.spec().channels().count() as u8);
+            decoded.copy_to_vec_interleaved(&mut self.sample_buf);
+            self.sample_pos = 0;
+            return Ok(());
+        }
     }
 
     pub fn read(&mut self, buffer: &mut [f32]) -> Result<usize> {
@@ -310,12 +391,27 @@ impl SymphoniaDecoder {
         Ok(())
     }
 
-    pub fn format(&self) -> AudioFormat {
-        AudioFormat {
+    pub fn format_info(&mut self) -> Result<DecoderFormatInfo> {
+        self.ensure_channels_from_first_frame()?;
+        let channels = self.channels.ok_or_else(|| {
+            RmpdError::Player("Channel count unavailable after format probe".to_owned())
+        })?;
+
+        Ok(DecoderFormatInfo {
             sample_rate: self.sample_rate,
-            channels: self.channels.unwrap_or(2), // Default to stereo if not yet known
-            bits_per_sample: 16, // Symphonia decodes to f32, we report 16-bit for MPD compatibility
-        }
+            channels,
+            decode_bits_per_sample: 32,
+            compatibility_bits_per_sample: 16,
+        })
+    }
+
+    pub fn format(&mut self) -> Result<AudioFormat> {
+        let info = self.format_info()?;
+        Ok(AudioFormat {
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            bits_per_sample: info.compatibility_bits_per_sample,
+        })
     }
 
     pub fn duration(&self) -> Option<f64> {
@@ -326,8 +422,8 @@ impl SymphoniaDecoder {
         self.sample_rate
     }
 
-    pub fn channels(&self) -> u8 {
-        self.channels.unwrap_or(2) // Default to stereo if not yet known
+    pub fn channels(&self) -> Option<u8> {
+        self.channels
     }
 
     /// Get the current instantaneous bitrate in kbps (for VBR files this changes during playback)
@@ -383,22 +479,22 @@ impl SymphoniaDecoder {
 pub trait Decoder: Send {
     fn read(&mut self, buffer: &mut [f32]) -> Result<usize>;
     fn seek(&mut self, position: f64) -> Result<()>;
-    fn format(&self) -> AudioFormat;
+    fn format(&mut self) -> Result<AudioFormat>;
     fn duration(&self) -> Option<f64>;
 }
 
 impl Decoder for SymphoniaDecoder {
     fn read(&mut self, buffer: &mut [f32]) -> Result<usize> {
-        self.read(buffer)
+        SymphoniaDecoder::read(self, buffer)
     }
     fn seek(&mut self, position: f64) -> Result<()> {
-        self.seek(position)
+        SymphoniaDecoder::seek(self, position)
     }
-    fn format(&self) -> AudioFormat {
-        self.format()
+    fn format(&mut self) -> Result<AudioFormat> {
+        SymphoniaDecoder::format(self)
     }
     fn duration(&self) -> Option<f64> {
-        self.duration()
+        SymphoniaDecoder::duration(self)
     }
 }
 

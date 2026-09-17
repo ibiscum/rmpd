@@ -4,6 +4,7 @@
 //! by a particular streaming protocol.  The trait is object-safe so outputs
 //! can choose an encoder at construction time.
 
+use crate::conversion;
 use rmpd_core::song::AudioFormat;
 
 /// Encodes interleaved f32 PCM into a wire byte stream for network outputs.
@@ -45,12 +46,7 @@ impl Encoder for PcmEncoder {
     }
 
     fn encode(&mut self, samples: &[f32]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(samples.len() * 2);
-        for &s in samples {
-            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        out
+        conversion::samples_to_s16le(samples)
     }
 }
 
@@ -67,6 +63,14 @@ pub struct WavEncoder {
     format: AudioFormat,
 }
 
+fn wav_pcm16_timing_fields(format: AudioFormat) -> (u16, u32, u16) {
+    let channels = u16::from(format.channels);
+    const BYTES_PER_SAMPLE: u16 = 2;
+    let block_align = channels.saturating_mul(BYTES_PER_SAMPLE);
+    let byte_rate = format.sample_rate.saturating_mul(u32::from(block_align));
+    (channels, byte_rate, block_align)
+}
+
 impl WavEncoder {
     pub fn new(format: AudioFormat) -> Self {
         Self { format }
@@ -79,10 +83,8 @@ impl Encoder for WavEncoder {
     }
 
     fn header(&self) -> Vec<u8> {
-        let channels = self.format.channels as u16;
         let sample_rate = self.format.sample_rate;
-        let byte_rate: u32 = sample_rate * u32::from(channels) * 2;
-        let block_align: u16 = channels * 2;
+        let (channels, byte_rate, block_align) = wav_pcm16_timing_fields(self.format);
         const BITS_PER_SAMPLE: u16 = 16;
         // Use 0xFFFF_FFFF for both RIFF and data sizes — standard trick for
         // streaming WAV where the total length is not known up front.
@@ -114,12 +116,7 @@ impl Encoder for WavEncoder {
     }
 
     fn encode(&mut self, samples: &[f32]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(samples.len() * 2);
-        for &s in samples {
-            let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        out
+        conversion::samples_to_s16le(samples)
     }
 }
 
@@ -220,5 +217,72 @@ mod tests {
         let bytes = enc.encode(&[1.0_f32]);
         let v = i16::from_le_bytes([bytes[0], bytes[1]]);
         assert_eq!(v, i16::MAX);
+    }
+
+    #[test]
+    fn encoders_handle_non_finite_samples_consistently() {
+        let mut pcm = PcmEncoder::new(stereo_44100());
+        let mut wav = WavEncoder::new(stereo_44100());
+        let samples = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+
+        let pcm_bytes = pcm.encode(&samples);
+        let wav_bytes = wav.encode(&samples);
+
+        assert_eq!(pcm_bytes, wav_bytes);
+        assert_eq!(pcm_bytes.len(), 6);
+
+        let s0 = i16::from_le_bytes([pcm_bytes[0], pcm_bytes[1]]);
+        let s1 = i16::from_le_bytes([pcm_bytes[2], pcm_bytes[3]]);
+        let s2 = i16::from_le_bytes([pcm_bytes[4], pcm_bytes[5]]);
+
+        assert_eq!(s0, 0);
+        assert_eq!(s1, i16::MAX);
+        assert_eq!(s2, -i16::MAX);
+    }
+
+    #[test]
+    fn wav_header_fields_match_audio_format() {
+        let fmt = AudioFormat {
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: 24,
+        };
+        let enc = WavEncoder::new(fmt);
+        let h = enc.header();
+
+        let audio_format = u16::from_le_bytes(h[20..22].try_into().unwrap());
+        let channels = u16::from_le_bytes(h[22..24].try_into().unwrap());
+        let sample_rate = u32::from_le_bytes(h[24..28].try_into().unwrap());
+        let byte_rate = u32::from_le_bytes(h[28..32].try_into().unwrap());
+        let block_align = u16::from_le_bytes(h[32..34].try_into().unwrap());
+        let bits_per_sample = u16::from_le_bytes(h[34..36].try_into().unwrap());
+
+        assert_eq!(audio_format, 1);
+        assert_eq!(channels, 2);
+        assert_eq!(sample_rate, 48000);
+        assert_eq!(byte_rate, 48000 * 2 * 2);
+        assert_eq!(block_align, 4);
+        assert_eq!(bits_per_sample, 16);
+    }
+
+    #[test]
+    fn wav_header_byte_rate_saturates_on_extreme_format() {
+        let fmt = AudioFormat {
+            sample_rate: u32::MAX,
+            channels: u8::MAX,
+            bits_per_sample: 16,
+        };
+        let (_, byte_rate, block_align) = wav_pcm16_timing_fields(fmt);
+        assert_eq!(block_align, u16::from(u8::MAX) * 2);
+        assert_eq!(byte_rate, u32::MAX);
+    }
+
+    #[test]
+    fn pcm_and_wav_payload_are_identical_for_same_samples() {
+        let mut pcm = PcmEncoder::new(stereo_44100());
+        let mut wav = WavEncoder::new(stereo_44100());
+        let samples = [0.0_f32, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5];
+
+        assert_eq!(pcm.encode(&samples), wav.encode(&samples));
     }
 }

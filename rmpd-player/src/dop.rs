@@ -8,9 +8,13 @@
 /// - DSD128 (5.6448 MHz) → 352.8 kHz PCM (5.6448 / 16 = 352.8)
 ///
 /// Each PCM sample contains:
-/// - Byte 0: Marker (0x05 or 0xFA alternating)
-/// - Byte 1: 8 bits of DSD data
-/// - Byte 2: 8 more bits of DSD data
+/// - Logical DoP byte 0: marker (0x05 or 0xFA alternating)
+/// - Logical DoP byte 1: 8 bits of DSD data
+/// - Logical DoP byte 2: 8 more bits of DSD data
+///
+/// In this encoder, the 24-bit DoP payload is left-aligned into a 32-bit i32
+/// sample: [marker][dsd_hi][dsd_lo][0x00]. On little-endian outputs this is
+/// serialized as bytes [0x00, dsd_lo, dsd_hi, marker].
 ///
 /// Reference: https://dsd-guide.com/sites/default/files/white-papers/DoP_openStandard_1v1.pdf
 use rmpd_core::error::{Result, RmpdError};
@@ -62,6 +66,12 @@ impl DopEncoder {
         channel_layout: ChannelDataLayout,
         bit_order: BitOrder,
     ) -> Result<Self> {
+        if channels == 0 {
+            return Err(RmpdError::Player(
+                "DoP encoder requires at least one channel".to_owned(),
+            ));
+        }
+
         // Validate DSD sample rate
         match dsd_sample_rate {
             2822400 => {} // DSD64
@@ -215,15 +225,14 @@ impl DopEncoder {
         }
     }
 
-    /// Convert DoP 24-bit samples (i32) to f32 for cpal
+    /// Convert left-aligned DoP i32 samples to normalized f32.
+    ///
+    /// This preserves integer headroom/range semantics only; it does NOT make
+    /// DoP data suitable for bit-perfect transport over floating-point output.
     pub fn to_f32_samples(dop_i32: &[i32]) -> Vec<f32> {
         dop_i32
             .iter()
-            .map(|&sample| {
-                // Normalize 24-bit to f32 range [-1.0, 1.0]
-                // 24-bit range: -8388608 to 8388607
-                (sample as f32) / 8388608.0
-            })
+            .map(|&sample| (sample as f32) / 2147483648.0)
             .collect()
     }
 }
@@ -306,5 +315,40 @@ mod tests {
         let produced_frames = output.len() / 2; // 2 channels per frame
         assert!(produced_frames < naive_frames);
         assert_eq!(produced_frames, 2); // floor(11 / (2 channels * 2 bytes)) == 2
+    }
+
+    #[test]
+    fn test_rejects_zero_channels() {
+        let err = DopEncoder::new(2822400, 0, ChannelDataLayout::Planar, BitOrder::MsbFirst)
+            .err()
+            .expect("zero channels must be rejected");
+        assert!(err.to_string().contains("at least one channel"));
+    }
+
+    #[test]
+    fn test_to_f32_samples_stays_in_range_for_left_aligned_dop() {
+        // Typical marker-only DoP silence for first frame.
+        let dop = vec![0x05000000_i32, 0xFA000000_u32 as i32, i32::MAX, i32::MIN + 1];
+        let out = DopEncoder::to_f32_samples(&dop);
+        assert_eq!(out.len(), dop.len());
+        for &v in &out {
+            assert!((-1.0..=1.0).contains(&v));
+        }
+    }
+
+    #[test]
+    fn test_lsb_first_bit_reversal_is_applied() {
+        let mut encoder =
+            DopEncoder::new(2822400, 1, ChannelDataLayout::Planar, BitOrder::LsbFirst).unwrap();
+        let dsd_data = vec![0b0000_0011, 0b1010_0000];
+        let mut output = Vec::new();
+
+        encoder.encode(&dsd_data, &mut output);
+
+        assert_eq!(output.len(), 1);
+        let byte1 = ((output[0] >> 16) & 0xFF) as u8;
+        let byte2 = ((output[0] >> 8) & 0xFF) as u8;
+        assert_eq!(byte1, 0b1100_0000);
+        assert_eq!(byte2, 0b0000_0101);
     }
 }
