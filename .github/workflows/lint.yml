@@ -17,10 +17,18 @@ on:
       - '**.yaml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   actionlint:
     name: GitHub Actions Linting
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
 
