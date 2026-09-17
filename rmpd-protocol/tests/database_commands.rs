@@ -176,6 +176,20 @@ async fn listfiles_nonexistent_directory_stays_sys_error() {
 }
 
 #[tokio::test]
+async fn listfiles_absolute_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("listfiles \"/etc\"").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
+async fn listfiles_traversal_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("listfiles \"../etc\"").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
 async fn update_nonexistent_path_is_no_exist() {
     let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
     let resp = client.command("update nosuch").await;
@@ -214,6 +228,20 @@ async fn albumart_missing_uri_is_no_exist() {
 }
 
 #[tokio::test]
+async fn albumart_absolute_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("albumart \"/etc/passwd\" 0").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
+async fn albumart_traversal_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("albumart \"../etc/passwd\" 0").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
 async fn readpicture_missing_uri_is_no_exist() {
     let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
     let resp = client.command("readpicture \"nosuch.flac\" 0").await;
@@ -221,8 +249,36 @@ async fn readpicture_missing_uri_is_no_exist() {
 }
 
 #[tokio::test]
+async fn readpicture_absolute_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("readpicture \"/etc/passwd\" 0").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
+async fn readpicture_traversal_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("readpicture \"../etc/passwd\" 0").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
 async fn readcomments_missing_uri_is_no_exist() {
     let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
     let resp = client.command("readcomments \"nosuch.flac\"").await;
     assert!(resp.starts_with("ACK [50@0]"), "got: {resp}");
+}
+
+#[tokio::test]
+async fn readcomments_absolute_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("readcomments \"/etc/passwd\"").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
+}
+
+#[tokio::test]
+async fn readcomments_traversal_path_is_arg_error() {
+    let (_server, mut client, _tmp) = tcp_harness::setup_with_db(1).await;
+    let resp = client.command("readcomments \"../etc/passwd\"").await;
+    assert!(resp.starts_with("ACK [2@0]"), "got: {resp}");
 }

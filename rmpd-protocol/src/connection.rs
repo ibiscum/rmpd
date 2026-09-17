@@ -42,6 +42,10 @@ pub struct ConnectionState {
     /// Channels this client is subscribed to
     pub subscribed_channels: Vec<String>,
 
+    /// Message-broker client id for MPD-style per-client inboxes.
+    /// Zero means not yet registered.
+    pub message_client_id: u64,
+
     /// Current partition for this connection (defaults to "default")
     pub current_partition: String,
 
@@ -71,6 +75,7 @@ impl ConnectionState {
             enabled_features: Some(HashSet::new()),       // No protocol features enabled by default
             enabled_normalizations: Some(HashSet::new()), // None enabled by default
             subscribed_channels: Vec::new(),
+            message_client_id: 0,
             current_partition: "default".to_string(),
             permissions: PERMISSION_ALL,
             is_local: false,

@@ -9,22 +9,56 @@ use crate::state::AppState;
 /// Strip music directory prefix from absolute path
 fn strip_music_dir_prefix<'a>(path: &'a str, music_dir: Option<&str>) -> &'a str {
     if let Some(music_dir) = music_dir {
-        // Normalize music_dir to end with /
-        let music_dir_with_slash = if music_dir.ends_with('/') {
-            music_dir
-        } else {
-            // Need to handle this case by checking both variants
-            if let Some(stripped) = path.strip_prefix(music_dir) {
-                return stripped.trim_start_matches('/');
+        // Strip only on a true directory boundary: `/music/file` should match
+        // `/music`, while `/music2/file` must not.
+        let base = music_dir.trim_end_matches('/');
+        if !base.is_empty() {
+            if path == base {
+                return "";
             }
-            music_dir
-        };
-
-        if let Some(stripped) = path.strip_prefix(music_dir_with_slash) {
-            return stripped;
+            if let Some(without_base) = path.strip_prefix(base)
+                && let Some(stripped) = without_base.strip_prefix('/')
+            {
+                return stripped;
+            }
         }
     }
     path
+}
+
+fn malformed_path_ack(command: &str) -> String {
+    ResponseBuilder::error(ACK_ERROR_ARG, 0, command, "Malformed path")
+}
+
+fn resolve_music_relative_path(command: &str, music_dir: Option<&str>, uri: &str) -> Result<String, String> {
+    if !rmpd_core::path::uri_safe_local(uri) {
+        return Err(malformed_path_ack(command));
+    }
+    let Some(music_dir) = music_dir else {
+        return Err(ResponseBuilder::error(
+            ACK_ERROR_NO_EXIST,
+            0,
+            command,
+            "music directory not configured",
+        ));
+    };
+
+    Ok(format!("{}/{}", music_dir.trim_end_matches('/'), uri))
+}
+
+fn resolve_music_relative_or_absolute_path(
+    command: &str,
+    music_dir: Option<&str>,
+    uri: &str,
+) -> Result<String, String> {
+    if uri.starts_with('/') {
+        if music_dir.is_some() {
+            return Err(malformed_path_ack(command));
+        }
+        return Ok(uri.to_string());
+    }
+
+    resolve_music_relative_path(command, music_dir, uri)
 }
 
 /// Maps a database directory-lookup failure to the right ACK code, mirroring
@@ -568,20 +602,13 @@ pub async fn handle_albumart_command(state: &AppState, uri: &str, offset: usize)
     // Local files: `albumart` only looks at a standalone cover image
     // (cover.png/.jpg/.jxl/.webp) in the song's directory — it never reads
     // embedded tag pictures. That's `readpicture`'s job.
-    let absolute_path = if uri.starts_with('/') {
-        uri.to_string()
-    } else {
-        match &state.music_dir {
-            Some(music_dir) => format!("{music_dir}/{uri}"),
-            None => {
-                return Response::Text(ResponseBuilder::error(
-                    ACK_ERROR_NO_EXIST,
-                    0,
-                    "albumart",
-                    "music directory not configured",
-                ));
-            }
-        }
+    let absolute_path = match resolve_music_relative_or_absolute_path(
+        "albumart",
+        state.music_dir.as_deref(),
+        uri,
+    ) {
+        Ok(p) => p,
+        Err(e) => return Response::Text(e),
     };
     let dir = match std::path::Path::new(&absolute_path).parent() {
         Some(d) => d.to_path_buf(),
@@ -720,20 +747,13 @@ pub async fn handle_readpicture_command(state: &AppState, uri: &str, offset: usi
         };
     }
 
-    let absolute_path = if uri.starts_with('/') {
-        uri.to_string()
-    } else {
-        match &state.music_dir {
-            Some(music_dir) => format!("{music_dir}/{uri}"),
-            None => {
-                return Response::Text(ResponseBuilder::error(
-                    ACK_ERROR_NO_EXIST,
-                    0,
-                    "readpicture",
-                    "music directory not configured",
-                ));
-            }
-        }
+    let absolute_path = match resolve_music_relative_or_absolute_path(
+        "readpicture",
+        state.music_dir.as_deref(),
+        uri,
+    ) {
+        Ok(p) => p,
+        Err(e) => return Response::Text(e),
     };
 
     let uri_owned = uri.to_string();
@@ -1104,16 +1124,15 @@ pub async fn handle_listfiles_command(state: &AppState, uri: Option<&str>) -> St
     let path = uri.unwrap_or("");
     // Prefer filesystem listing (like MPD) to show all files with size.
     if let Some(music_dir) = state.music_dir.as_deref() {
+        if !path.is_empty() && !rmpd_core::path::uri_safe_local(path) {
+            return malformed_path_ack("listfiles");
+        }
+
         let full_path = if path.is_empty() {
             std::path::PathBuf::from(music_dir)
         } else {
             std::path::PathBuf::from(music_dir).join(path)
         };
-
-        // Safety: reject path traversal
-        if path.contains("..") {
-            return ResponseBuilder::error(ACK_ERROR_ARG, 0, "listfiles", "bad path");
-        }
 
         let path_owned = path.to_string();
         let fs_result = tokio::task::spawn_blocking(move || {
@@ -1263,12 +1282,14 @@ pub async fn handle_readcomments_command(state: &AppState, uri: &str) -> String 
         return ResponseBuilder::new().ok();
     }
 
-    // Resolve absolute path from music_dir + relative URI
-    let abs_path = if let Some(music_dir) = &state.music_dir {
-        let base = music_dir.trim_end_matches('/');
-        format!("{base}/{uri}")
+    // Resolve path using MPD-style local URI safety checks when the music
+    // directory is configured. Absolute/unsafe paths are rejected.
+    let abs_path = if state.music_dir.is_some() {
+        match resolve_music_relative_or_absolute_path("readcomments", state.music_dir.as_deref(), uri) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
     } else {
-        // Try as-is (absolute path)
         uri.to_string()
     };
 
@@ -1297,7 +1318,7 @@ pub async fn handle_readcomments_command(state: &AppState, uri: &str) -> String 
         }
         Err(e) => {
             error!("readcomments error for {uri}: {e}");
-            ResponseBuilder::error(ACK_ERROR_SYS, 0, "readcomments", "No such song")
+            ResponseBuilder::error(ACK_ERROR_SYS, 0, "readcomments", &e.to_string())
         }
     }
 }

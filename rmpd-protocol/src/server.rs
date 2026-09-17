@@ -325,6 +325,7 @@ async fn handle_client_inner(
     } else {
         conn_state.permissions = 0;
     }
+    conn_state.message_client_id = state.message_broker.register_client().await;
 
     // Command batching state
     let mut batch_mode = false;
@@ -512,9 +513,12 @@ async fn handle_client_inner(
         writer.flush().await?; // Flush immediately to ensure low latency
     }
 
-    // Cleanup: unregister any channel subscriptions when connection closes
-    for channel in conn_state.subscribed_channels() {
-        state.message_broker.unregister_subscriber(channel).await;
+    // Cleanup: unregister client and remove all of its subscriptions/messages.
+    if conn_state.message_client_id != 0 {
+        let _ = state
+            .message_broker
+            .unregister_client(conn_state.message_client_id)
+            .await;
     }
     Ok(())
 }

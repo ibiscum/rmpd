@@ -18,6 +18,13 @@ fn notify_subscription_changed(state: &AppState) {
         .emit(rmpd_core::event::Event::SubscriptionChanged);
 }
 
+async fn ensure_message_client_id(state: &AppState, conn_state: &mut ConnectionState) -> u64 {
+    if conn_state.message_client_id == 0 {
+        conn_state.message_client_id = state.message_broker.register_client().await;
+    }
+    conn_state.message_client_id
+}
+
 /// Subscribe to a message channel
 ///
 /// Clients can subscribe to named channels to receive messages.
@@ -54,8 +61,12 @@ pub async fn handle_subscribe_command(
             "subscription list is full",
         );
     }
+    let client_id = ensure_message_client_id(state, conn_state).await;
     conn_state.subscribe(channel.to_string());
-    state.message_broker.register_subscriber(channel).await;
+    let _ = state
+        .message_broker
+        .register_subscriber(client_id, channel)
+        .await;
     notify_subscription_changed(state);
     ResponseBuilder::new().ok()
 }
@@ -80,14 +91,19 @@ pub async fn handle_unsubscribe_command(
         );
     }
     conn_state.unsubscribe(channel);
-    state.message_broker.unregister_subscriber(channel).await;
+    if conn_state.message_client_id != 0 {
+        let _ = state
+            .message_broker
+            .unregister_subscriber(conn_state.message_client_id, channel)
+            .await;
+    }
     notify_subscription_changed(state);
     ResponseBuilder::new().ok()
 }
 
 /// List all available message channels
 ///
-/// Returns channels that currently have messages or subscribers.
+/// Returns channels that currently have subscribers.
 pub async fn handle_channels_command(state: &AppState) -> String {
     let channels = state.message_broker.list_channels().await;
     let mut resp = ResponseBuilder::new();
@@ -101,13 +117,16 @@ pub async fn handle_channels_command(state: &AppState) -> String {
 
 /// Read messages from subscribed channels
 ///
-/// Returns all messages from channels this client is subscribed to,
-/// and removes them from the queue.
+/// Returns all messages queued for this client and drains its inbox.
 pub async fn handle_readmessages_command(state: &AppState, conn_state: &ConnectionState) -> String {
-    let messages = state
-        .message_broker
-        .read_messages(conn_state.subscribed_channels())
-        .await;
+    let messages = if conn_state.message_client_id == 0 {
+        Vec::new()
+    } else {
+        state
+            .message_broker
+            .read_messages(conn_state.message_client_id)
+            .await
+    };
 
     let mut resp = ResponseBuilder::new();
 
@@ -133,14 +152,16 @@ pub async fn handle_sendmessage_command(state: &AppState, channel: &str, message
     {
         return ResponseBuilder::error(ACK_ERROR_ARG, 0, "sendmessage", "invalid channel name");
     }
-    let ok = state
+    let result = state
         .message_broker
         .send_message(channel.to_string(), message.to_string())
         .await;
-    if ok {
-        state
-            .event_bus
-            .emit(rmpd_core::event::Event::MessageReceived);
+    if result.delivered {
+        if result.notified_idle_message {
+            state
+                .event_bus
+                .emit(rmpd_core::event::Event::MessageReceived);
+        }
         ResponseBuilder::new().ok()
     } else {
         ResponseBuilder::error(
