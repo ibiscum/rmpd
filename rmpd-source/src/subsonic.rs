@@ -134,7 +134,6 @@ pub struct SubsonicConfig {
     pub api_key: Option<String>,
     pub max_bitrate: Option<u32>,
     pub format: Option<String>,
-    pub accept_invalid_certs: bool,
 }
 
 /// Hand-written `Debug` that redacts credentials (`password`, `api_key`) so a
@@ -151,7 +150,6 @@ impl std::fmt::Debug for SubsonicConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("max_bitrate", &self.max_bitrate)
             .field("format", &self.format)
-            .field("accept_invalid_certs", &self.accept_invalid_certs)
             .finish()
     }
 }
@@ -209,18 +207,23 @@ impl SubsonicConfig {
 
         let format = cfg.setting_str("format");
 
-        let accept_invalid_certs = match cfg.setting_str("accept_invalid_certs") {
+        match cfg.setting_str("accept_invalid_certs") {
             Some(v) => match v.to_ascii_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
+                "true" => {
+                    return Err(SourceError::Config(
+                        "`accept_invalid_certs = true` is not supported because it disables TLS certificate validation"
+                            .to_owned(),
+                    ));
+                }
+                "false" => {}
                 _ => {
                     return Err(SourceError::Config(format!(
                         "invalid `accept_invalid_certs` value `{v}`: expected true or false"
                     )));
                 }
             },
-            None => false,
-        };
+            None => {}
+        }
 
         Ok(Self {
             name: cfg.name.clone(),
@@ -231,7 +234,6 @@ impl SubsonicConfig {
             api_key,
             max_bitrate,
             format,
-            accept_invalid_certs,
         })
     }
 }
@@ -252,24 +254,7 @@ pub struct SubsonicSource {
 pub fn subsonic_source_factory(cfg: &SourceConfig) -> Result<Box<dyn MusicSource>, SourceError> {
     let sc = SubsonicConfig::from_source_config(cfg)?;
 
-    if sc.accept_invalid_certs {
-        tracing::warn!(
-            "subsonic source '{}': TLS certificate verification disabled via accept_invalid_certs=true",
-            sc.name
-        );
-    }
-
-    // Build the HTTP client first so we can set TLS options before handing it to the
-    // Subsonic client, avoiding the double-construction `with_danger_accept_invalid_certs`
-    // would cause.
-    let http = if sc.accept_invalid_certs {
-        reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| SourceError::Config(format!("cannot build HTTP client: {e}")))?
-    } else {
-        reqwest::Client::new()
-    };
+    let http = reqwest::Client::new();
 
     let auth = if let Some(key) = sc.api_key {
         Auth::api_key(key)
@@ -882,6 +867,29 @@ mod tests {
         assert!(
             matches!(result, Err(SourceError::Config(_))),
             "invalid accept_invalid_certs should fail"
+        );
+    }
+
+    #[test]
+    fn from_source_config_rejects_accept_invalid_certs_true() {
+        let mut settings = toml::Table::new();
+        settings.insert(
+            "url".to_owned(),
+            toml::Value::String("https://music.example.com".to_owned()),
+        );
+        settings.insert(
+            "api_key".to_owned(),
+            toml::Value::String("my-key".to_owned()),
+        );
+        settings.insert(
+            "accept_invalid_certs".to_owned(),
+            toml::Value::String("true".to_owned()),
+        );
+        let cfg = make_cfg_with(settings);
+        let result = SubsonicConfig::from_source_config(&cfg);
+        assert!(
+            matches!(result, Err(SourceError::Config(_))),
+            "accept_invalid_certs=true should fail"
         );
     }
 
