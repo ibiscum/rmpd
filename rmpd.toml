@@ -104,7 +104,12 @@ filesystem_watch = true
 # url = "https://music.example.com"
 # username = "alice"
 # password = "s3cr3t"
+# # api_key = "subsonic-api-key"     # alternative to username/password
 # # Optional: cap streaming bitrate (kbps). 0 or absent = server default.
 # # max_bitrate = 320
 # # Optional: preferred transcoding format ("raw" = original, "mp3", "opus", …).
 # # format = "raw"
+# # Optional: allow plain HTTP URLs (insecure; default false).
+# # allow_insecure_http = false
+# # Optional: skip TLS certificate validation (insecure; default false).
+# # accept_invalid_certs = false

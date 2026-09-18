@@ -291,12 +291,16 @@ enabled = true
 url = "https://music.example.com"
 username = "alice"
 password = "secret"                # or use `api_key = "..."` instead
+# api_key = "subsonic-api-key"      # alternative to username/password
 # max_bitrate = 320                 # optional server-side transcode cap (kbps)
-# format = "mp3"                    # optional transcode target ("raw" = no transcode)
+# format = "raw"                    # optional transcode target ("raw" = no transcode)
+# allow_insecure_http = true         # optional: permit non-HTTPS server URL
+# accept_invalid_certs = true        # optional: allow invalid TLS certs (insecure)
 ```
 
 Credentials are never written to logs. An unreachable server is skipped at
-startup without aborting (previously-synced tracks remain browsable).
+startup without aborting (previously-synced tracks remain browsable). By
+default, HTTPS is required and TLS certificates are validated.
 
 ## Desktop Integration (MPRIS)
 

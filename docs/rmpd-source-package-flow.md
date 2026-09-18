@@ -109,6 +109,9 @@ Primary file: src/subsonic.rs (enabled by feature `subsonic`).
 Behavior:
 
 - factory validates config/auth mode and builds client without immediate network I/O.
+- supported auth is either `api_key` or `username` + `password`.
+- HTTPS is required by default; `allow_insecure_http = true` permits plain HTTP.
+- `accept_invalid_certs = true` disables TLS certificate verification (warn-logged).
 - `ping`: validates connectivity/auth.
 - `browse`: root-level artist directory listing.
 - `list_all`: paginates album list, fetches album songs concurrently, maps to virtual songs.

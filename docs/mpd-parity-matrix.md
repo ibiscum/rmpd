@@ -2,6 +2,8 @@
 
 This document tracks protocol-behavior parity between rmpd and upstream MPD.
 
+Last verified: 2026-09-17T20:01:57Z via docs/mpd-command-parity-checklist.md regeneration.
+
 References:
 - Upstream source: https://github.com/MusicPlayerDaemon/MPD
 - Upstream messaging handlers: src/command/MessageCommands.cxx
