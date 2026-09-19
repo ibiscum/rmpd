@@ -2,6 +2,15 @@ use rmpd_core::event::EventBus;
 use rmpd_library::{Database, Scanner};
 use std::path::Path;
 
+fn default_music_dir(home: Option<&str>) -> String {
+    let home = home.unwrap_or(".");
+    format!("{home}/Music")
+}
+
+fn resolve_music_dir(cli_arg: Option<String>, home: Option<&str>) -> String {
+    cli_arg.unwrap_or_else(|| default_music_dir(home))
+}
+
 fn main() -> anyhow::Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
@@ -19,10 +28,9 @@ fn main() -> anyhow::Result<()> {
     let scanner = Scanner::new(event_bus, false);
 
     // Scan music directory
-    let music_dir = std::env::args().nth(1).unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{home}/Music")
-    });
+    let cli_arg = std::env::args().nth(1);
+    let home = std::env::var("HOME").ok();
+    let music_dir = resolve_music_dir(cli_arg, home.as_deref());
 
     println!("Scanning: {music_dir}");
 
@@ -54,4 +62,37 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_music_dir_uses_home_when_present() {
+        assert_eq!(default_music_dir(Some("/home/alice")), "/home/alice/Music");
+    }
+
+    #[test]
+    fn default_music_dir_falls_back_to_dot_when_home_missing() {
+        assert_eq!(default_music_dir(None), "./Music");
+    }
+
+    #[test]
+    fn resolve_music_dir_prefers_cli_arg() {
+        let resolved = resolve_music_dir(Some("/mnt/music".to_string()), Some("/home/alice"));
+        assert_eq!(resolved, "/mnt/music");
+    }
+
+    #[test]
+    fn resolve_music_dir_uses_home_when_arg_missing() {
+        let resolved = resolve_music_dir(None, Some("/home/alice"));
+        assert_eq!(resolved, "/home/alice/Music");
+    }
+
+    #[test]
+    fn resolve_music_dir_uses_dot_when_arg_and_home_missing() {
+        let resolved = resolve_music_dir(None, None);
+        assert_eq!(resolved, "./Music");
+    }
 }

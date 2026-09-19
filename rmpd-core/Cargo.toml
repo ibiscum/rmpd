@@ -17,7 +17,7 @@ tracing.workspace = true
 camino = { workspace = true, features = ["serde1"] }
 toml.workspace = true
 rand = "0.10"
-dirs = "6"
+dirs.workspace = true
 rusqlite = { workspace = true, optional = true }
 symphonia = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
