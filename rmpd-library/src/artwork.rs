@@ -278,6 +278,8 @@ pub(crate) fn picture_type_to_string(pic_type: PictureType) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn infer_mime_detects_webp_with_12_byte_header() {
@@ -291,8 +293,19 @@ mod tests {
     }
 
     #[test]
+    fn infer_mime_detects_common_signatures() {
+        assert_eq!(infer_mime(b"\xFF\xD8\xFF\x00"), "image/jpeg");
+        assert_eq!(infer_mime(b"\x89PNG\r\n\x1a\nrest"), "image/png");
+        assert_eq!(infer_mime(b"GIF89a"), "image/gif");
+    }
+
+    #[test]
     fn preferred_picture_index_prioritizes_front_then_other_then_first() {
-        let types = vec![PictureType::Media, PictureType::CoverFront, PictureType::Icon];
+        let types = vec![
+            PictureType::Media,
+            PictureType::CoverFront,
+            PictureType::Icon,
+        ];
         assert_eq!(preferred_picture_index(&types), Some(1));
 
         let types = vec![PictureType::Media, PictureType::Other, PictureType::Icon];
@@ -313,13 +326,82 @@ mod tests {
     #[test]
     fn should_extract_from_file_rejects_relative_path() {
         let err = should_extract_from_file("relative/path.flac").expect_err("relative path");
-        assert!(err
-            .to_string()
-            .contains("Artwork file path must be absolute"));
+        assert!(
+            err.to_string()
+                .contains("Artwork file path must be absolute")
+        );
     }
 
     #[test]
     fn should_extract_from_file_accepts_absolute_path() {
-        assert!(matches!(should_extract_from_file("/tmp/song.flac"), Ok(true)));
+        assert!(matches!(
+            should_extract_from_file("/tmp/song.flac"),
+            Ok(true)
+        ));
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_digest() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn picture_type_to_string_maps_expected_variants() {
+        assert_eq!(picture_type_to_string(PictureType::CoverFront), "front");
+        assert_eq!(picture_type_to_string(PictureType::CoverBack), "back");
+        assert_eq!(picture_type_to_string(PictureType::Artist), "artist");
+        assert_eq!(picture_type_to_string(PictureType::LeadArtist), "artist");
+    }
+
+    #[test]
+    fn find_external_cover_returns_not_found_when_no_cover_exists() {
+        let dir = tempdir().expect("create temp dir");
+        match find_external_cover(dir.path(), 0) {
+            ArtLookup::NotFound => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_external_cover_obeys_priority_and_chunks_data() {
+        let dir = tempdir().expect("create temp dir");
+
+        // Even if jpg exists, cover.png must win due to priority ordering.
+        fs::write(dir.path().join("cover.jpg"), vec![1_u8; 128]).expect("write jpg");
+        fs::write(dir.path().join("cover.png"), vec![2_u8; 9000]).expect("write png");
+
+        match find_external_cover(dir.path(), 8190) {
+            ArtLookup::Found(found) => {
+                assert_eq!(found.filename, "cover.png");
+                assert_eq!(found.total_size, 9000);
+                assert_eq!(found.data.len(), 810); // 9000 - 8190
+                assert!(found.data.iter().all(|b| *b == 2));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_external_cover_offset_boundaries_match_mpd_behavior() {
+        let dir = tempdir().expect("create temp dir");
+        fs::write(dir.path().join("cover.webp"), b"abcd").expect("write cover");
+
+        // offset > total size is invalid.
+        match find_external_cover(dir.path(), 5) {
+            ArtLookup::OffsetTooLarge => {}
+            other => panic!("expected OffsetTooLarge, got {other:?}"),
+        }
+
+        // offset == total size is valid and yields an empty chunk.
+        match find_external_cover(dir.path(), 4) {
+            ArtLookup::Found(found) => {
+                assert_eq!(found.total_size, 4);
+                assert!(found.data.is_empty());
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 }

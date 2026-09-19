@@ -920,7 +920,9 @@ impl Database {
                  (SELECT DISTINCT song_id FROM song_tags WHERE tag IN ({placeholders}) AND value != ''))"
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            stmt.query_row(rusqlite::params_from_iter(tag_list.iter()), |row| row.get(0))?
+            stmt.query_row(rusqlite::params_from_iter(tag_list.iter()), |row| {
+                row.get(0)
+            })?
         };
         if has_missing {
             values.push(String::new());
@@ -1437,10 +1439,7 @@ impl Database {
                 format!(
                     "SELECT {SONG_COLUMNS} FROM songs WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'"
                 ),
-                vec![
-                    path.to_owned(),
-                    format!("{path}/%"),
-                ],
+                vec![path.to_owned(), format!("{path}/%")],
             )
         };
         let mut stmt = self.conn.prepare(&sql)?;

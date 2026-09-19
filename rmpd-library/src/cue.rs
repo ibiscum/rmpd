@@ -296,9 +296,9 @@ FILE "x.flac" WAVE
         assert!(parse_cue("not a cue sheet\njust text").is_empty());
     }
 
-        #[test]
-        fn title_and_performer_between_files_do_not_mutate_previous_track() {
-                let cue = r#"
+    #[test]
+    fn title_and_performer_between_files_do_not_mutate_previous_track() {
+        let cue = r#"
 PERFORMER "Album Artist"
 TITLE "Album"
 FILE "a.flac" WAVE
@@ -314,22 +314,22 @@ PERFORMER "Album Artist 2"
         INDEX 01 00:00:00
 "#;
 
-                let tracks = parse_cue(cue);
-                assert_eq!(tracks.len(), 2);
+        let tracks = parse_cue(cue);
+        assert_eq!(tracks.len(), 2);
 
-                assert_eq!(tracks[0].file, "a.flac");
-                assert_eq!(tracks[0].title.as_deref(), Some("A1"));
-                assert_eq!(tracks[0].performer.as_deref(), Some("Artist A"));
+        assert_eq!(tracks[0].file, "a.flac");
+        assert_eq!(tracks[0].title.as_deref(), Some("A1"));
+        assert_eq!(tracks[0].performer.as_deref(), Some("Artist A"));
 
-                assert_eq!(tracks[1].file, "b.flac");
-                assert_eq!(tracks[1].title.as_deref(), Some("B1"));
-                assert_eq!(tracks[1].album.as_deref(), Some("Album Retag"));
-                assert_eq!(tracks[1].album_performer.as_deref(), Some("Album Artist 2"));
-        }
+        assert_eq!(tracks[1].file, "b.flac");
+        assert_eq!(tracks[1].title.as_deref(), Some("B1"));
+        assert_eq!(tracks[1].album.as_deref(), Some("Album Retag"));
+        assert_eq!(tracks[1].album_performer.as_deref(), Some("Album Artist 2"));
+    }
 
-        #[test]
-        fn skips_track_without_file_and_invalid_track_numbers() {
-                let cue = r#"
+    #[test]
+    fn skips_track_without_file_and_invalid_track_numbers() {
+        let cue = r#"
 TRACK 01 AUDIO
     INDEX 01 00:00:00
 FILE "disc.flac" WAVE
@@ -341,10 +341,10 @@ FILE "disc.flac" WAVE
         INDEX 01 00:30:00
 "#;
 
-                let tracks = parse_cue(cue);
-                assert_eq!(tracks.len(), 1);
-                assert_eq!(tracks[0].file, "disc.flac");
-                assert_eq!(tracks[0].number, 1);
-                assert!(approx(tracks[0].start, 30.0));
-        }
+        let tracks = parse_cue(cue);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].file, "disc.flac");
+        assert_eq!(tracks[0].number, 1);
+        assert!(approx(tracks[0].start, 30.0));
+    }
 }

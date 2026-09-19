@@ -781,8 +781,10 @@ fn test_list_directory_recursive_respects_path_boundary() {
     let db = rmpd_library::database::Database::open(&db_path).unwrap();
 
     db.add_song(&make_local_song("rock/song1.flac")).unwrap();
-    db.add_song(&make_local_song("rock/sub/song2.flac")).unwrap();
-    db.add_song(&make_local_song("rockabilly/song3.flac")).unwrap();
+    db.add_song(&make_local_song("rock/sub/song2.flac"))
+        .unwrap();
+    db.add_song(&make_local_song("rockabilly/song3.flac"))
+        .unwrap();
 
     let recursive = db.list_directory_recursive("rock").unwrap();
     let paths: Vec<&str> = recursive.iter().map(|s| s.path.as_str()).collect();
@@ -844,7 +846,11 @@ fn test_root_resolution_uses_empty_path_row() {
     use rusqlite::{Connection, params};
 
     let temp_dir = tempfile::TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("root.db").to_string_lossy().to_string();
+    let db_path = temp_dir
+        .path()
+        .join("root.db")
+        .to_string_lossy()
+        .to_string();
 
     // Ensure schema exists.
     rmpd_library::database::Database::open(&db_path).unwrap();

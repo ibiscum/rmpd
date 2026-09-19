@@ -56,12 +56,18 @@ mod tests {
     #[test]
     fn unix_secs_from_epoch_and_after() {
         assert_eq!(system_time_to_unix_secs(UNIX_EPOCH), 0);
-        assert_eq!(system_time_to_unix_secs(UNIX_EPOCH + Duration::from_secs(123)), 123);
+        assert_eq!(
+            system_time_to_unix_secs(UNIX_EPOCH + Duration::from_secs(123)),
+            123
+        );
     }
 
     #[test]
     fn unix_secs_pre_epoch_is_clamped_to_zero() {
-        assert_eq!(system_time_to_unix_secs(UNIX_EPOCH - Duration::from_secs(1)), 0);
+        assert_eq!(
+            system_time_to_unix_secs(UNIX_EPOCH - Duration::from_secs(1)),
+            0
+        );
     }
 
     #[test]

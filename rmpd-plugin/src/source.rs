@@ -30,11 +30,7 @@ impl SourceError {
     fn scrub_message(msg: impl Into<String>) -> String {
         let raw = msg.into();
         // Keep user-facing diagnostics single-line and bounded.
-        let mut out = raw
-            .replace('\n', " ")
-            .replace('\r', " ")
-            .trim()
-            .to_owned();
+        let mut out = raw.replace('\n', " ").replace('\r', " ").trim().to_owned();
         if out.len() > 512 {
             out.truncate(512);
         }

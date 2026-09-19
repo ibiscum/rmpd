@@ -328,7 +328,12 @@ mod tests {
     #[test]
     fn test_to_f32_samples_stays_in_range_for_left_aligned_dop() {
         // Typical marker-only DoP silence for first frame.
-        let dop = vec![0x05000000_i32, 0xFA000000_u32 as i32, i32::MAX, i32::MIN + 1];
+        let dop = vec![
+            0x05000000_i32,
+            0xFA000000_u32 as i32,
+            i32::MAX,
+            i32::MIN + 1,
+        ];
         let out = DopEncoder::to_f32_samples(&dop);
         assert_eq!(out.len(), dop.len());
         for &v in &out {

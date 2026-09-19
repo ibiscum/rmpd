@@ -479,10 +479,7 @@ mod tests {
 
     #[test]
     fn normalize_alsa_numeric_shorthand() {
-        assert_eq!(
-            normalize_alsa("hw:1,0").as_deref(),
-            Some("hw:CARD=1,DEV=0")
-        );
+        assert_eq!(normalize_alsa("hw:1,0").as_deref(), Some("hw:CARD=1,DEV=0"));
         assert_eq!(normalize_alsa("hw:2").as_deref(), Some("hw:CARD=2,DEV=0"));
         assert_eq!(
             normalize_alsa("plughw:3,4").as_deref(),
@@ -502,7 +499,10 @@ mod tests {
         let devices = vec![
             ("hw:CARD=2,DEV=0".to_owned(), "DAC Two".to_owned()),
             ("hw:CARD=1,DEV=0".to_owned(), "USB DAC One".to_owned()),
-            ("pulse".to_owned(), "Built-in Audio Analog Stereo".to_owned()),
+            (
+                "pulse".to_owned(),
+                "Built-in Audio Analog Stereo".to_owned(),
+            ),
         ];
 
         assert_eq!(pick_device_index(&devices, "hw:CARD=1,DEV=0"), Some(1));

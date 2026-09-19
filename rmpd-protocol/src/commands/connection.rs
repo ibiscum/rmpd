@@ -57,21 +57,11 @@ pub async fn handle_config_command(state: &AppState, conn_state: &ConnectionStat
 /// Sends a shutdown signal to the main server loop, triggering graceful shutdown.
 pub async fn handle_kill_command(state: &AppState) -> String {
     let Some(shutdown_tx) = &state.shutdown_tx else {
-        return ResponseBuilder::error(
-            ACK_ERROR_SYS,
-            0,
-            "kill",
-            "shutdown channel not configured",
-        );
+        return ResponseBuilder::error(ACK_ERROR_SYS, 0, "kill", "shutdown channel not configured");
     };
 
     if shutdown_tx.send(()).is_err() {
-        return ResponseBuilder::error(
-            ACK_ERROR_SYS,
-            0,
-            "kill",
-            "shutdown channel closed",
-        );
+        return ResponseBuilder::error(ACK_ERROR_SYS, 0, "kill", "shutdown channel closed");
     }
 
     ResponseBuilder::new().ok()
@@ -121,7 +111,10 @@ mod tests {
         let state = AppState::new();
         let resp = handle_kill_command(&state).await;
         assert!(resp.contains("ACK [52@0] {kill}"), "got: {resp}");
-        assert!(resp.contains("shutdown channel not configured"), "got: {resp}");
+        assert!(
+            resp.contains("shutdown channel not configured"),
+            "got: {resp}"
+        );
     }
 
     #[tokio::test]
@@ -144,7 +137,10 @@ mod tests {
 
         let resp = handle_kill_command(&state).await;
         assert_eq!(resp, "OK\n");
-        let got = rx.recv().await.expect("receiver should observe shutdown signal");
+        let got = rx
+            .recv()
+            .await
+            .expect("receiver should observe shutdown signal");
         assert_eq!(got, ());
     }
 

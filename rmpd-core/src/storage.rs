@@ -239,7 +239,14 @@ mod tests {
             .unwrap();
 
         assert!(!registry.is_mounted("remote/nas").await);
-        assert!(registry.get("remote/nas").await.unwrap().mounted_at.is_none());
+        assert!(
+            registry
+                .get("remote/nas")
+                .await
+                .unwrap()
+                .mounted_at
+                .is_none()
+        );
 
         registry
             .register_mounted(
@@ -250,7 +257,14 @@ mod tests {
             .unwrap();
 
         assert!(registry.is_mounted("remote/nas2").await);
-        assert!(registry.get("remote/nas2").await.unwrap().mounted_at.is_some());
+        assert!(
+            registry
+                .get("remote/nas2")
+                .await
+                .unwrap()
+                .mounted_at
+                .is_some()
+        );
     }
 
     #[tokio::test]

@@ -83,8 +83,9 @@ impl Scanner {
             // has one configured (a scan of one of its own subtrees), keep it — `root_path` is
             // then a subtree root, not the library root, and prune_missing/file_is_present need
             // the real root to resolve database-relative paths back to disk.
-            let utf8_root = Utf8PathBuf::try_from(root_path.to_path_buf())
-                .map_err(|_| RmpdError::Library("Music directory path is not valid UTF-8".into()))?;
+            let utf8_root = Utf8PathBuf::try_from(root_path.to_path_buf()).map_err(|_| {
+                RmpdError::Library("Music directory path is not valid UTF-8".into())
+            })?;
             let scanner_with_dir = self.with_music_dir(
                 self.music_directory
                     .clone()
@@ -520,8 +521,8 @@ mod tests {
 
     #[test]
     fn make_relative_path_rejects_paths_outside_music_directory() {
-        let scanner = Scanner::new(EventBus::new(), false)
-            .with_music_dir(Utf8PathBuf::from("/music/root"));
+        let scanner =
+            Scanner::new(EventBus::new(), false).with_music_dir(Utf8PathBuf::from("/music/root"));
 
         let err = scanner
             .make_relative_path(&Utf8PathBuf::from("/other/location/song.flac"))
@@ -532,8 +533,8 @@ mod tests {
 
     #[test]
     fn make_relative_path_strips_root_prefix_exactly() {
-        let scanner = Scanner::new(EventBus::new(), false)
-            .with_music_dir(Utf8PathBuf::from("/music/root"));
+        let scanner =
+            Scanner::new(EventBus::new(), false).with_music_dir(Utf8PathBuf::from("/music/root"));
 
         let rel = scanner
             .make_relative_path(&Utf8PathBuf::from("/music/root/album/song.flac"))
@@ -556,7 +557,8 @@ mod tests {
         let db_path = temp_dir.path().join("scan-events.db");
         let db = Database::open(db_path.to_str().expect("utf-8 db path")).expect("open db");
 
-        let non_utf8_root = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0x66, 0x80]));
+        let non_utf8_root =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0x66, 0x80]));
         let result = scanner.scan_directory(&db, &non_utf8_root);
         assert!(result.is_err(), "non-UTF8 root should fail");
 

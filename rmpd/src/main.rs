@@ -227,3 +227,39 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_bind_addr_ipv4() {
+        assert_eq!(make_bind_addr("127.0.0.1", 6600), "127.0.0.1:6600");
+    }
+
+    #[test]
+    fn make_bind_addr_hostname() {
+        assert_eq!(make_bind_addr("localhost", 6600), "localhost:6600");
+    }
+
+    #[test]
+    fn make_bind_addr_ipv6_bare_gets_bracketed() {
+        assert_eq!(make_bind_addr("::1", 6600), "[::1]:6600");
+    }
+
+    #[test]
+    fn make_bind_addr_ipv6_already_bracketed() {
+        assert_eq!(make_bind_addr("[::1]", 6600), "[::1]:6600");
+    }
+
+    #[test]
+    fn default_env_filter_includes_expected_directives() {
+        let filter = default_env_filter("info").to_string();
+
+        assert!(filter.contains("info"));
+        assert!(filter.contains("lofty=error"));
+        assert!(filter.contains("symphonia=error"));
+        assert!(filter.contains("cpal=warn"));
+        assert!(filter.contains("zbus=warn"));
+    }
+}

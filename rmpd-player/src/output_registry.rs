@@ -35,14 +35,14 @@ fn parse_buffer_time_ms(raw: Option<&str>) -> u32 {
         .unwrap_or(500)
 }
 
-fn normalized_output_type(output_type: &str, output_name: &str) -> String {
+fn normalized_output_type(output_type: &str, _output_name: &str) -> String {
     let type_lower = output_type.to_lowercase();
     #[cfg(not(all(feature = "pipewire", target_os = "linux")))]
     {
         if type_lower == "pipewire" {
             tracing::warn!(
                 "pipewire feature not built; routing output \"{}\" via the default cpal device",
-                output_name
+                _output_name
             );
             return "default".to_owned();
         }
@@ -234,60 +234,36 @@ mod tests {
     #[test]
     fn fifo_requires_path_or_fifo_path() {
         let cfg = cfg_with_type("fifo");
-        let err = create_output(
-            test_format(),
-            ResamplerQuality::default(),
-            &cfg,
-            500,
-            None,
-        )
-        .err()
-        .expect("fifo without path must fail");
+        let err = create_output(test_format(), ResamplerQuality::default(), &cfg, 500, None)
+            .err()
+            .expect("fifo without path must fail");
         assert!(err.to_string().contains("fifo output requires"));
     }
 
     #[test]
     fn pipe_requires_command() {
         let cfg = cfg_with_type("pipe");
-        let err = create_output(
-            test_format(),
-            ResamplerQuality::default(),
-            &cfg,
-            500,
-            None,
-        )
-        .err()
-        .expect("pipe without command must fail");
+        let err = create_output(test_format(), ResamplerQuality::default(), &cfg, 500, None)
+            .err()
+            .expect("pipe without command must fail");
         assert!(err.to_string().contains("pipe output requires"));
     }
 
     #[test]
     fn recorder_requires_path() {
         let cfg = cfg_with_type("recorder");
-        let err = create_output(
-            test_format(),
-            ResamplerQuality::default(),
-            &cfg,
-            500,
-            None,
-        )
-        .err()
-        .expect("recorder without path must fail");
+        let err = create_output(test_format(), ResamplerQuality::default(), &cfg, 500, None)
+            .err()
+            .expect("recorder without path must fail");
         assert!(err.to_string().contains("recorder output requires"));
     }
 
     #[test]
     fn unknown_output_type_returns_error() {
         let cfg = cfg_with_type("not-a-real-output");
-        let err = create_output(
-            test_format(),
-            ResamplerQuality::default(),
-            &cfg,
-            500,
-            None,
-        )
-        .err()
-        .expect("unknown type must fail");
+        let err = create_output(test_format(), ResamplerQuality::default(), &cfg, 500, None)
+            .err()
+            .expect("unknown type must fail");
         assert!(err.to_string().contains("unknown audio output type"));
     }
 

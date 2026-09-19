@@ -502,12 +502,14 @@ mod tests {
         let mut out = PipeWireOutput::new(format, &cfg, 500).expect("construct");
 
         let pause_err = out.pause().err().expect("pause before start must fail");
-        assert!(pause_err.to_string().to_ascii_lowercase().contains("not started"));
+        assert!(
+            pause_err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("not started")
+        );
 
-        let resume_err = out
-            .resume()
-            .err()
-            .expect("resume before start must fail");
+        let resume_err = out.resume().err().expect("resume before start must fail");
         assert!(
             resume_err
                 .to_string()

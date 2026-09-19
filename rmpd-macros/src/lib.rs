@@ -69,9 +69,7 @@ pub fn derive_command_metadata(input: TokenStream) -> TokenStream {
                     }
                 } else if meta.path.is_ident("permission") {
                     if seen_permission {
-                        return Err(
-                            meta.error("duplicate `permission` key in `command` attribute")
-                        );
+                        return Err(meta.error("duplicate `permission` key in `command` attribute"));
                     }
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;

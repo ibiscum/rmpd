@@ -151,3 +151,129 @@ impl Default for EventBus {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, EventBus, Subsystem};
+    use crate::song::{Song, intern_tag_key};
+    use crate::state::PlayerState;
+    use std::time::Duration;
+
+    fn sample_song(path: &str) -> Song {
+        Song {
+            id: 1,
+            path: path.into(),
+            duration: Some(Duration::from_secs(180)),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            bits_per_sample: Some(16),
+            bitrate: Some(320),
+            replay_gain_track_gain: None,
+            replay_gain_track_peak: None,
+            replay_gain_album_gain: None,
+            replay_gain_album_peak: None,
+            added_at: 0,
+            last_modified: 0,
+            tags: vec![(intern_tag_key("title"), "Sample".to_owned())],
+        }
+    }
+
+    #[test]
+    fn subsystem_mapping_covers_significant_events() {
+        let song = sample_song("music/test.flac");
+
+        let cases: Vec<(Event, &[Subsystem])> = vec![
+            (Event::PlayerStateChanged(PlayerState::Play), &[Subsystem::Player]),
+            (Event::SongChanged(None), &[Subsystem::Player]),
+            (
+                Event::StreamTitleChanged(Some("Radio Track".to_owned())),
+                &[Subsystem::Player],
+            ),
+            (Event::SongFinished, &[Subsystem::Player]),
+            (Event::VolumeChanged(42), &[Subsystem::Mixer]),
+            (Event::QueueChanged, &[Subsystem::Playlist]),
+            (Event::QueueOptionsChanged, &[Subsystem::Options]),
+            (Event::StoredPlaylistChanged, &[Subsystem::StoredPlaylist]),
+            (Event::DatabaseUpdateStarted, &[Subsystem::Update]),
+            (
+                Event::DatabaseUpdateProgress {
+                    scanned: 1,
+                    total: 2,
+                },
+                &[Subsystem::Update],
+            ),
+            (
+                Event::DatabaseUpdateFinished,
+                &[Subsystem::Database, Subsystem::Update],
+            ),
+            (Event::SongAdded(song.clone()), &[Subsystem::Database]),
+            (Event::SongUpdated(song), &[Subsystem::Database]),
+            (
+                Event::SongDeleted {
+                    path: "music/deleted.flac".to_owned(),
+                },
+                &[Subsystem::Database],
+            ),
+            (Event::OutputsChanged, &[Subsystem::Output]),
+            (Event::PartitionsChanged, &[Subsystem::Partition]),
+            (Event::MountsChanged, &[Subsystem::Mount]),
+            (Event::StickerChanged, &[Subsystem::Sticker]),
+            (Event::SubscriptionChanged, &[Subsystem::Subscription]),
+            (Event::MessageReceived, &[Subsystem::Message]),
+        ];
+
+        for (event, expected) in cases {
+            assert_eq!(event.subsystems(), expected);
+        }
+    }
+
+    #[test]
+    fn subsystem_mapping_ignores_high_frequency_or_internal_events() {
+        let cases = vec![
+            Event::PositionChanged(Duration::from_secs(12)),
+            Event::BitrateChanged(Some(256)),
+            Event::FilesystemWatchStarted,
+            Event::FilesystemWatchStopped,
+            Event::AdvancedToNext,
+        ];
+
+        for event in cases {
+            assert!(event.subsystems().is_empty());
+        }
+    }
+
+    #[test]
+    fn event_bus_delivers_to_single_subscriber() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        bus.emit(Event::QueueChanged);
+
+        let event = rx.try_recv().expect("subscriber should receive emitted event");
+        assert!(matches!(event, Event::QueueChanged));
+    }
+
+    #[test]
+    fn event_bus_delivers_to_multiple_subscribers() {
+        let bus = EventBus::new();
+        let mut rx1 = bus.subscribe();
+        let mut rx2 = bus.subscribe();
+
+        bus.emit(Event::OutputsChanged);
+
+        assert!(matches!(
+            rx1.try_recv().expect("subscriber 1 should receive event"),
+            Event::OutputsChanged
+        ));
+        assert!(matches!(
+            rx2.try_recv().expect("subscriber 2 should receive event"),
+            Event::OutputsChanged
+        ));
+    }
+
+    #[test]
+    fn event_bus_emit_without_subscribers_is_safe() {
+        let bus = EventBus::default();
+        bus.emit(Event::MessageReceived);
+    }
+}

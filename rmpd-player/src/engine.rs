@@ -353,7 +353,7 @@ impl PlaybackEngine {
         let new_state = match current {
             v if v == PlayerState::Play.to_atomic() => PlayerState::Pause.to_atomic(),
             v if v == PlayerState::Pause.to_atomic() => PlayerState::Play.to_atomic(),
-            _ => return Ok(()),            // Stop -> do nothing
+            _ => return Ok(()), // Stop -> do nothing
         };
         self.atomic_state.store(new_state, Ordering::Release);
         Ok(())
@@ -504,8 +504,7 @@ impl PlaybackEngine {
                 info!("DSD file detected, attempting DoP output");
                 // Release any cached PCM output so DoP can open the device.
                 output_slot.clear();
-                if let Some((dop_encoder, dop_out)) = resolve_dop_setup(Self::setup_dop(&decoder))
-                {
+                if let Some((dop_encoder, dop_out)) = resolve_dop_setup(Self::setup_dop(&decoder)) {
                     info!("DoP output available, using native DSD playback");
                     return Self::run_dsd_dop(
                         decoder,
@@ -714,8 +713,8 @@ impl PlaybackEngine {
                         // Claim the pre-fetched next song (destructive take —
                         // only the first crossing of cf_start ever finds a value).
                         let cf_next = next_song.lock().take().and_then(|ps| {
-                            let mut dec = SymphoniaDecoder::open(ps.resolved_path.as_std_path())
-                                .ok()?;
+                            let mut dec =
+                                SymphoniaDecoder::open(ps.resolved_path.as_std_path()).ok()?;
                             let dec_format = dec.format().ok()?;
                             if !dec.is_dsd()
                                 && dec_format.sample_rate == format.sample_rate
@@ -917,7 +916,8 @@ impl PlaybackEngine {
                     // pre-fed a format-compatible next song does the gapless path
                     // activate.
                     let gapless_next = next_song.lock().take().and_then(|ps| {
-                        let mut dec = SymphoniaDecoder::open(ps.resolved_path.as_std_path()).ok()?;
+                        let mut dec =
+                            SymphoniaDecoder::open(ps.resolved_path.as_std_path()).ok()?;
                         let dec_format = dec.format().ok()?;
                         if !dec.is_dsd()
                             && dec_format.sample_rate == format.sample_rate
@@ -1172,11 +1172,8 @@ impl PlaybackEngine {
         let mut dsd_buffer = Vec::new();
         let mut dop_i32_buffer = Vec::new();
         let mut total_dsd_bytes: u64 = 0;
-        let dsd_bytes_per_second = non_zero_units_per_second(
-            dsd_sample_rate / 8,
-            channels as u64,
-            "DSD",
-        )?;
+        let dsd_bytes_per_second =
+            non_zero_units_per_second(dsd_sample_rate / 8, channels as u64, "DSD")?;
         // DoP startup is complete when this loop is entered.
         atomic_state.store(PlayerState::Play.to_atomic(), Ordering::Release);
         // Track whether pause() has been called so we only call it once on

@@ -368,7 +368,10 @@ fn test_song_tag_with_fallback_albumartistsort_chain() {
         tags: vec![(intern_tag_key("artistsort"), "Artist Sort".to_string())],
     };
 
-    assert_eq!(song.tag_with_fallback("albumartistsort"), Some("Artist Sort"));
+    assert_eq!(
+        song.tag_with_fallback("albumartistsort"),
+        Some("Artist Sort")
+    );
 }
 
 #[test]

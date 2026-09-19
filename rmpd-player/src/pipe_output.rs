@@ -167,10 +167,7 @@ mod tests {
         out.start().expect("start should succeed");
         out.stop().expect("stop should succeed");
 
-        let err = out
-            .write(&[0.0])
-            .err()
-            .expect("write after stop must fail");
+        let err = out.write(&[0.0]).err().expect("write after stop must fail");
         assert!(err.to_string().to_ascii_lowercase().contains("not started"));
 
         out.start().expect("restart should succeed");

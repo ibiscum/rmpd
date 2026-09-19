@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn fallback_chain_known_tags_is_case_insensitive() {
-        assert_eq!(tag_fallback_chain("AlbumArtist"), vec!["albumartist", "artist"]);
+        assert_eq!(
+            tag_fallback_chain("AlbumArtist"),
+            vec!["albumartist", "artist"]
+        );
         assert_eq!(tag_fallback_chain("TitleSort"), vec!["titlesort", "title"]);
     }
 

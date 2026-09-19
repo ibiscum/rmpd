@@ -30,7 +30,11 @@ fn malformed_path_ack(command: &str) -> String {
     ResponseBuilder::error(ACK_ERROR_ARG, 0, command, "Malformed path")
 }
 
-fn resolve_music_relative_path(command: &str, music_dir: Option<&str>, uri: &str) -> Result<String, String> {
+fn resolve_music_relative_path(
+    command: &str,
+    music_dir: Option<&str>,
+    uri: &str,
+) -> Result<String, String> {
     if !rmpd_core::path::uri_safe_local(uri) {
         return Err(malformed_path_ack(command));
     }
@@ -1285,7 +1289,11 @@ pub async fn handle_readcomments_command(state: &AppState, uri: &str) -> String 
     // Resolve path using MPD-style local URI safety checks when the music
     // directory is configured. Absolute/unsafe paths are rejected.
     let abs_path = if state.music_dir.is_some() {
-        match resolve_music_relative_or_absolute_path("readcomments", state.music_dir.as_deref(), uri) {
+        match resolve_music_relative_or_absolute_path(
+            "readcomments",
+            state.music_dir.as_deref(),
+            uri,
+        ) {
             Ok(p) => p,
             Err(e) => return e,
         }

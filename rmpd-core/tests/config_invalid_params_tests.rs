@@ -37,8 +37,7 @@ fn config_load_nonexistent_file_returns_read_error() {
 #[test]
 fn config_load_malformed_toml_returns_parse_error() {
     let path = unique_temp_path("malformed.toml");
-    fs::write(&path, "[general\nmusic_directory = \"/tmp\"\n")
-        .expect("write malformed config");
+    fs::write(&path, "[general\nmusic_directory = \"/tmp\"\n").expect("write malformed config");
 
     let err = Config::discover(Some(&path), DiscoverOptions::default())
         .expect_err("malformed TOML should fail");
@@ -54,8 +53,11 @@ fn config_load_malformed_toml_returns_parse_error() {
 fn config_load_nonexistent_music_directory_emits_warning() {
     let missing_music = unique_temp_path("no-music-dir");
     let cfg_path = unique_temp_path("invalid-music-config.toml");
-    fs::write(&cfg_path, minimal_config(missing_music.to_string_lossy().as_ref()))
-        .expect("write config");
+    fs::write(
+        &cfg_path,
+        minimal_config(missing_music.to_string_lossy().as_ref()),
+    )
+    .expect("write config");
 
     let load = Config::discover(Some(&cfg_path), DiscoverOptions::default())
         .expect("nonexistent music dir should load with warning");

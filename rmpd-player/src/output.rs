@@ -37,8 +37,7 @@ fn channel_depth_for(buffer_time_ms: u32, sample_rate: u32, channels: u16) -> us
     if buffer_time_ms == 0 {
         return 32; // safe default if somehow zero
     }
-    let samples_needed =
-        (buffer_time_ms as u64 * sample_rate as u64 * channels as u64) / 1000;
+    let samples_needed = (buffer_time_ms as u64 * sample_rate as u64 * channels as u64) / 1000;
     samples_needed.div_ceil(SAMPLES_PER_CHUNK).max(4) as usize
 }
 
@@ -178,8 +177,11 @@ impl CpalOutput {
         };
         let sample_format = device_config.find_pcm_format()?;
 
-        let channel_depth =
-            channel_depth_for(self.buffer_time_ms, self.config.sample_rate, self.config.channels);
+        let channel_depth = channel_depth_for(
+            self.buffer_time_ms,
+            self.config.sample_rate,
+            self.config.channels,
+        );
         let (tx, rx) = sync_channel::<Vec<f32>>(channel_depth);
 
         let stream = match sample_format {
@@ -312,7 +314,9 @@ impl CpalOutput {
     pub fn stop(&mut self) -> Result<()> {
         if let Some(ref mut rs) = self.resampler {
             let tail = rs.flush()?;
-            if !tail.is_empty() && let Some(ref sender) = self.sample_sender {
+            if !tail.is_empty()
+                && let Some(ref sender) = self.sample_sender
+            {
                 sender.send(tail).map_err(|_| {
                     RmpdError::Player("Failed to send flushed samples to output".to_owned())
                 })?;
@@ -373,6 +377,52 @@ mod tests {
     use rmpd_core::config::ResamplerQuality;
     use rmpd_core::song::AudioFormat;
 
+    fn run_output_lifecycle(format: AudioFormat, buffer_time_ms: u32) -> Result<(), String> {
+        let mut out = CpalOutput::new(format, ResamplerQuality::default(), buffer_time_ms)
+            .map_err(|e| format!("construct output: {e}"))?;
+
+        out.start().map_err(|e| format!("start: {e}"))?;
+
+        let samples = vec![0.0_f32; 4096];
+        let written = out
+            .write(&samples)
+            .map_err(|e| format!("write while started: {e}"))?;
+        if written != samples.len() {
+            return Err(format!(
+                "unexpected write size: got {written}, expected {}",
+                samples.len()
+            ));
+        }
+
+        // Some backends/devices do not support hardware pause. We still assert
+        // core start/write/stop behavior and only validate pause state when it works.
+        if out.pause().is_ok() {
+            if !out.is_paused() {
+                return Err("pause succeeded but output is not marked paused".to_owned());
+            }
+            out.resume().map_err(|e| format!("resume: {e}"))?;
+            if out.is_paused() {
+                return Err("output stayed paused after resume".to_owned());
+            }
+        }
+
+        out.stop().map_err(|e| format!("stop: {e}"))?;
+
+        let stopped_err = out
+            .write(&samples)
+            .err()
+            .ok_or_else(|| "write after stop unexpectedly succeeded".to_owned())?;
+        if !stopped_err
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("not started")
+        {
+            return Err(format!("unexpected post-stop error: {stopped_err}"));
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn started_state_validation_is_strict() {
         assert!(validate_started_state(true, true).is_ok());
@@ -415,40 +465,46 @@ mod tests {
             bits_per_sample: 16,
         };
 
-        let run = || -> Result<(), String> {
-            let mut out = CpalOutput::new(format, ResamplerQuality::default(), 100)
-                .map_err(|e| format!("construct output: {e}"))?;
-
-            out.start().map_err(|e| format!("start: {e}"))?;
-
-            let samples = vec![0.0_f32; 4096];
-            let written = out
-                .write(&samples)
-                .map_err(|e| format!("write while started: {e}"))?;
-            if written != samples.len() {
-                return Err(format!(
-                    "unexpected write size: got {written}, expected {}",
-                    samples.len()
-                ));
-            }
-
-            out.stop().map_err(|e| format!("stop: {e}"))?;
-
-            let stopped_err = out
-                .write(&samples)
-                .err()
-                .ok_or_else(|| "write after stop unexpectedly succeeded".to_owned())?;
-            if !stopped_err.to_string().to_ascii_lowercase().contains("not started") {
-                return Err(format!("unexpected post-stop error: {stopped_err}"));
-            }
-
-            Ok(())
-        }();
+        let run = run_output_lifecycle(format, 100);
 
         set_output_device(None);
 
         if let Err(msg) = run {
             panic!("{msg}");
+        }
+    }
+
+    #[test]
+    fn cpal_e2e_with_configured_hardware_device_opt_in() {
+        if std::env::var("RMPD_HW_AUDIO_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let Some(device) = std::env::var("RMPD_HW_AUDIO_DEVICE")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+        else {
+            eprintln!(
+                "Skipping hardware audio test: set RMPD_HW_AUDIO_DEVICE (example: hw:CARD=1,DEV=0)"
+            );
+            return;
+        };
+
+        set_output_device(Some(device.clone()));
+
+        let format = AudioFormat {
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 16,
+        };
+
+        let run = run_output_lifecycle(format, 100);
+
+        set_output_device(None);
+
+        if let Err(msg) = run {
+            panic!("hardware CPAL test failed for '{device}': {msg}");
         }
     }
 }

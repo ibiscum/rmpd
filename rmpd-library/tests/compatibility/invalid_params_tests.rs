@@ -36,10 +36,18 @@ fn metadata_read_raw_comments_missing_file_returns_library_error() {
 
 #[test]
 fn metadata_supported_file_extension_is_case_insensitive_and_rejects_missing_ext() {
-    assert!(MetadataExtractor::is_supported_file(&Utf8PathBuf::from("song.FLAC")));
-    assert!(MetadataExtractor::is_supported_file(&Utf8PathBuf::from("song.Mp3")));
-    assert!(!MetadataExtractor::is_supported_file(&Utf8PathBuf::from("README")));
-    assert!(!MetadataExtractor::is_supported_file(&Utf8PathBuf::from("archive.tar.gz")));
+    assert!(MetadataExtractor::is_supported_file(&Utf8PathBuf::from(
+        "song.FLAC"
+    )));
+    assert!(MetadataExtractor::is_supported_file(&Utf8PathBuf::from(
+        "song.Mp3"
+    )));
+    assert!(!MetadataExtractor::is_supported_file(&Utf8PathBuf::from(
+        "README"
+    )));
+    assert!(!MetadataExtractor::is_supported_file(&Utf8PathBuf::from(
+        "archive.tar.gz"
+    )));
 }
 
 #[test]

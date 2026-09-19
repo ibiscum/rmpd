@@ -149,11 +149,7 @@ impl Fingerprinter {
             // is a valid pointer to samples_read i16 elements. The pointer remains valid for
             // the duration of the FFI call. samples_read is guaranteed to be <= buffer_size.
             let result = unsafe {
-                chromaprint_sys_next::chromaprint_feed(
-                    self.ctx,
-                    i16_buffer.as_ptr(),
-                    to_feed_i32,
-                )
+                chromaprint_sys_next::chromaprint_feed(self.ctx, i16_buffer.as_ptr(), to_feed_i32)
             };
 
             if result == 0 {
@@ -234,6 +230,9 @@ unsafe impl Send for Fingerprinter {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ptr;
+
+    fn assert_send<T: Send>() {}
 
     #[test]
     fn test_fingerprinter_creation() {
@@ -266,8 +265,39 @@ mod tests {
     }
 
     #[test]
+    fn test_i32_conversion_boundaries_and_messages() {
+        assert_eq!(to_i32_u32(i32::MAX as u32, "sample_rate").unwrap(), i32::MAX);
+        let err = to_i32_u32(u32::MAX, "sample_rate").unwrap_err();
+        assert!(err.to_string().contains("sample_rate value"));
+
+        assert_eq!(to_i32_usize(i32::MAX as usize, "samples_read").unwrap(), i32::MAX);
+        let err = to_i32_usize((i32::MAX as usize) + 1, "samples_read").unwrap_err();
+        assert!(err.to_string().contains("samples_read value"));
+    }
+
+    #[test]
     fn test_max_samples_computation() {
         let total = max_samples(48_000, 2).unwrap();
         assert_eq!(total, 48_000 * 2 * MAX_FINGERPRINT_DURATION_SECS as usize);
+    }
+
+    #[test]
+    fn test_max_samples_zero_inputs() {
+        assert_eq!(max_samples(0, 2).unwrap(), 0);
+        assert_eq!(max_samples(48_000, 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_fingerprinter_is_send() {
+        assert_send::<Fingerprinter>();
+    }
+
+    #[test]
+    fn test_drop_with_null_context_is_noop() {
+        // Exercises the Drop branch where ctx is already null.
+        let fp = Fingerprinter {
+            ctx: ptr::null_mut(),
+        };
+        drop(fp);
     }
 }

@@ -236,13 +236,14 @@ async fn handle_fs_event(
                     Err(_) => continue,
                 };
 
-                let relative_utf8 = match camino::Utf8PathBuf::from_path_buf(relative_path.to_path_buf()) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        warn!("skipping non-UTF8 relative path: {:?}", relative_path);
-                        continue;
-                    }
-                };
+                let relative_utf8 =
+                    match camino::Utf8PathBuf::from_path_buf(relative_path.to_path_buf()) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!("skipping non-UTF8 relative path: {:?}", relative_path);
+                            continue;
+                        }
+                    };
                 let path_str = relative_utf8.as_str();
 
                 debug!("file removed: {}", path_str);

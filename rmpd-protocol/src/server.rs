@@ -635,10 +635,7 @@ async fn execute_command_list(
                 // Parse error - return ACK with index
                 let ack = parse_error_to_ack(cmd_str, &e, index as i32);
                 response.push_str(&ack);
-                return (
-                    Response::Text(response),
-                    false,
-                );
+                return (Response::Text(response), false);
             }
         }
     }

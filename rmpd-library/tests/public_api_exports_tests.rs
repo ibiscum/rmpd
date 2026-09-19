@@ -1,6 +1,7 @@
 use rmpd_library::{
     AlbumArtExtractor, Artwork, ArtworkData, CueTrack, Database, DbPool, DirectoryListing,
-    FilesystemWatcher, Fingerprinter, MetadataExtractor, PlaylistInfo, ScanStats, Scanner, WalkEntry,
+    FilesystemWatcher, Fingerprinter, MetadataExtractor, PlaylistInfo, ScanStats, Scanner,
+    WalkEntry,
 };
 
 #[test]

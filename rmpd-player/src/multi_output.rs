@@ -28,9 +28,9 @@ use crate::audio_output::AudioOutput;
 use crate::filter::{AudioFilter, VolumeFilter};
 use rmpd_core::error::{Result, RmpdError};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::Mutex as StdMutex;
 use std::thread::{self, JoinHandle};
 use tracing::{debug, warn};
 
@@ -94,9 +94,7 @@ impl MultiOutput {
                 })
                 .spawn(move || {
                     if let Err(e) = out.start() {
-                        if primary
-                            && let Ok(mut g) = worker_primary_error.lock()
-                        {
+                        if primary && let Ok(mut g) = worker_primary_error.lock() {
                             *g = Some(format!("primary output failed to start: {e}"));
                         }
                         warn!(
@@ -192,16 +190,15 @@ impl MultiOutput {
     pub fn write(&self, chunk: Arc<[f32]>) -> Result<()> {
         for w in &self.workers {
             if w.primary {
-                w.tx.send(OutputMsg::Samples(chunk.clone()))
-                    .map_err(|_| {
-                        let msg = self
-                            .primary_error
-                            .lock()
-                            .ok()
-                            .and_then(|g| g.clone())
-                            .unwrap_or_else(|| "primary output stopped".to_owned());
-                        RmpdError::Player(msg)
-                    })?;
+                w.tx.send(OutputMsg::Samples(chunk.clone())).map_err(|_| {
+                    let msg = self
+                        .primary_error
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .unwrap_or_else(|| "primary output stopped".to_owned());
+                    RmpdError::Player(msg)
+                })?;
             } else {
                 // Best-effort: silently drop on Full or Disconnected.
                 let _ = w.tx.try_send(OutputMsg::Samples(chunk.clone()));
@@ -534,12 +531,8 @@ mod tests {
             state: PauseState::new(),
         };
 
-        let multi = MultiOutput::spawn(
-            vec![Box::new(primary)],
-            1,
-            Arc::new(AtomicU8::new(100)),
-        )
-        .expect("spawn failed");
+        let multi = MultiOutput::spawn(vec![Box::new(primary)], 1, Arc::new(AtomicU8::new(100)))
+            .expect("spawn failed");
 
         let chunk: Arc<[f32]> = Arc::from(vec![0.0f32; 64].as_slice());
         multi.write(Arc::clone(&chunk)).expect("write must succeed");

@@ -48,5 +48,8 @@ fn invalid_unbalanced_parenthesis_rejected() {
 #[test]
 fn invalid_trailing_tokens_rejected() {
     let msg = parse_error("(artist == 'Radiohead') garbage");
-    assert!(msg.contains("Unparsed garbage after expression"), "unexpected: {msg}");
+    assert!(
+        msg.contains("Unparsed garbage after expression"),
+        "unexpected: {msg}"
+    );
 }

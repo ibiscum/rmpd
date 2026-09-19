@@ -337,6 +337,12 @@ rmpd includes comprehensive DSD support:
 cargo test --workspace --all-features
 ```
 
+### Audio Backend Test Opt-ins
+
+Real audio backend checks (Pulse virtual sink, concrete hardware device, and
+ignored PipeWire roundtrip) are intentionally opt-in and documented in
+[CI.md](CI.md#opt-in-audio-backend-tests).
+
 ### Linting
 
 ```bash

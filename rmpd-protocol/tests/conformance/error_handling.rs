@@ -221,7 +221,10 @@ async fn ack_for_unterminated_quoted_string() {
 async fn ack_for_missing_space_after_closing_quote() {
     let (_server, mut client) = setup().await;
     let resp = client.command("password \"closed\"extra").await;
-    assert_eq!(resp, "ACK [2@0] {password} Space expected after closing '\"'\n");
+    assert_eq!(
+        resp,
+        "ACK [2@0] {password} Space expected after closing '\"'\n"
+    );
 }
 
 #[tokio::test]

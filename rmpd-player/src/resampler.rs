@@ -15,9 +15,9 @@
 use rmpd_core::config::ResamplerQuality;
 use rmpd_core::error::{Result, RmpdError};
 use rubato::{
-    audioadapter_buffers::direct::InterleavedSlice,
     Async, FixedAsync, Indexing, PolynomialDegree, Resampler, SincInterpolationParameters,
-    SincInterpolationType, WindowFunction, calculate_cutoff,
+    SincInterpolationType, WindowFunction, audioadapter_buffers::direct::InterleavedSlice,
+    calculate_cutoff,
 };
 
 /// Number of input frames fed to the resampler per processing chunk. With a
@@ -95,7 +95,8 @@ impl StreamResampler {
         if !input.len().is_multiple_of(self.channels) {
             return Err(RmpdError::Player(format!(
                 "resampler input is not frame-aligned: {} samples for {} channels",
-                input.len(), self.channels
+                input.len(),
+                self.channels
             )));
         }
 
@@ -117,11 +118,15 @@ impl StreamResampler {
             // inside a block so the adapters release them before we read the
             // output and drain the input below.
             let (nbr_in, nbr_out) = {
-                let in_adapter = InterleavedSlice::new(&self.input[..chunk_samples], ch, self.chunk)
-                    .map_err(|e| RmpdError::Player(format!("resampler input adapter error: {e}")))?;
+                let in_adapter =
+                    InterleavedSlice::new(&self.input[..chunk_samples], ch, self.chunk).map_err(
+                        |e| RmpdError::Player(format!("resampler input adapter error: {e}")),
+                    )?;
                 let out_cap = self.scratch.len() / ch;
                 let mut out_adapter = InterleavedSlice::new_mut(&mut self.scratch, ch, out_cap)
-                    .map_err(|e| RmpdError::Player(format!("resampler output adapter error: {e}")))?;
+                    .map_err(|e| {
+                        RmpdError::Player(format!("resampler output adapter error: {e}"))
+                    })?;
                 match self.resampler.process_into_buffer(
                     &in_adapter,
                     &mut out_adapter,
@@ -158,7 +163,8 @@ impl StreamResampler {
         if !self.input.len().is_multiple_of(self.channels) {
             return Err(RmpdError::Player(format!(
                 "resampler internal buffer is not frame-aligned: {} samples for {} channels",
-                self.input.len(), self.channels
+                self.input.len(),
+                self.channels
             )));
         }
 
@@ -222,7 +228,9 @@ mod tests {
 
     fn frames_out(rs: &mut StreamResampler, input_frames: usize, channels: usize) -> usize {
         let input = vec![0.1f32; input_frames * channels];
-        let out = rs.process(&input).expect("resampler process should succeed");
+        let out = rs
+            .process(&input)
+            .expect("resampler process should succeed");
         assert_eq!(out.len() % channels, 0, "output not frame-aligned");
         out.len() / channels
     }
@@ -300,6 +308,9 @@ mod tests {
         assert!(rs.input.is_empty(), "flush should drain pending input");
 
         let second = rs.flush().expect("second flush should succeed");
-        assert!(second.is_empty(), "second flush should have no remaining tail");
+        assert!(
+            second.is_empty(),
+            "second flush should have no remaining tail"
+        );
     }
 }

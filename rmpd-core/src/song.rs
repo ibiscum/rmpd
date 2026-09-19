@@ -1,8 +1,8 @@
+use crate::tag::tag_fallback_chain;
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::time::Duration;
-use crate::tag::tag_fallback_chain;
 
 /// Well-known MPD tag names. Using static references avoids per-song String allocation.
 pub fn intern_tag_key(key: &str) -> Cow<'static, str> {

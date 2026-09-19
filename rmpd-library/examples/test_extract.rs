@@ -2,7 +2,8 @@ use camino::Utf8PathBuf;
 use rmpd_library::metadata::MetadataExtractor;
 use std::ffi::OsString;
 
-const USAGE: &str = "cargo run -p rmpd-library --example test_extract -- <audio-file> [<audio-file> ...]";
+const USAGE: &str =
+    "cargo run -p rmpd-library --example test_extract -- <audio-file> [<audio-file> ...]";
 
 /// Manual helper: extract and print metadata for one or more audio files.
 ///
@@ -33,10 +34,7 @@ fn run() -> Result<(), String> {
                 println!("  Genre: {}", opt_display(song.tag("genre")));
                 println!("  Sample Rate: {}", opt_display(song.sample_rate));
                 println!("  Channels: {}", opt_display(song.channels));
-                println!(
-                    "  Bits Per Sample: {}",
-                    opt_display(song.bits_per_sample)
-                );
+                println!("  Bits Per Sample: {}", opt_display(song.bits_per_sample));
                 println!("  Duration: {}", opt_debug(song.duration));
                 println!(
                     "  MusicBrainz TrackID: {}",
@@ -79,11 +77,11 @@ fn opt_display<T: std::fmt::Display>(value: Option<T>) -> String {
         .unwrap_or_else(|| "<missing>".to_string())
 }
 
-    fn opt_debug<T: std::fmt::Debug>(value: Option<T>) -> String {
-        value
+fn opt_debug<T: std::fmt::Debug>(value: Option<T>) -> String {
+    value
         .map(|v| format!("{v:?}"))
         .unwrap_or_else(|| "<missing>".to_string())
-    }
+}
 
 #[cfg(test)]
 mod tests {

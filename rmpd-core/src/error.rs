@@ -116,3 +116,89 @@ impl From<mdns_sd::Error> for RmpdError {
         RmpdError::Protocol(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RmpdError;
+    use std::borrow::Cow;
+
+    #[test]
+    fn detail_message_for_string_variants_is_borrowed() {
+        let cases = vec![
+            RmpdError::Config("cfg".to_owned()),
+            RmpdError::Database("db".to_owned()),
+            RmpdError::Player("player".to_owned()),
+            RmpdError::Protocol("proto".to_owned()),
+            RmpdError::ParseError("parse".to_owned()),
+            RmpdError::Library("lib".to_owned()),
+            RmpdError::Storage("storage".to_owned()),
+            RmpdError::NotFound("missing".to_owned()),
+            RmpdError::InvalidState("bad-state".to_owned()),
+        ];
+
+        for err in cases {
+            assert!(matches!(err.detail_message(), Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn detail_message_for_io_is_owned_and_preserves_text() {
+        let io = std::io::Error::other("disk offline");
+        let err = RmpdError::Io(io);
+
+        let detail = err.detail_message();
+        assert!(matches!(detail, Cow::Owned(_)));
+        assert_eq!(detail, "disk offline");
+    }
+
+    #[test]
+    fn permission_denied_detail_message_is_stable() {
+        let err = RmpdError::PermissionDenied;
+        assert_eq!(err.detail_message(), "Permission denied");
+    }
+
+    #[test]
+    fn display_prefixes_match_error_kind() {
+        assert_eq!(
+            RmpdError::Config("broken".to_owned()).to_string(),
+            "Configuration error: broken"
+        );
+        assert_eq!(
+            RmpdError::Protocol("bad command".to_owned()).to_string(),
+            "Protocol error: bad command"
+        );
+        assert_eq!(RmpdError::PermissionDenied.to_string(), "Permission denied");
+    }
+
+    #[cfg(feature = "database-errors")]
+    #[test]
+    fn conversion_impl_exists_for_rusqlite_error() {
+        fn assert_into<E: Into<RmpdError>>() {}
+        assert_into::<rusqlite::Error>();
+    }
+
+    #[cfg(feature = "player-errors")]
+    #[test]
+    fn conversion_impl_exists_for_player_errors() {
+        fn assert_into<E: Into<RmpdError>>() {}
+        assert_into::<symphonia::core::errors::Error>();
+        assert_into::<cpal::Error>();
+    }
+
+    #[cfg(feature = "library-errors")]
+    #[test]
+    fn conversion_impl_exists_for_library_errors() {
+        fn assert_into<E: Into<RmpdError>>() {}
+        assert_into::<lofty::error::FileParseError>();
+        assert_into::<lofty::error::TagParseError>();
+        assert_into::<tantivy::TantivyError>();
+        assert_into::<notify::Error>();
+    }
+
+    #[cfg(feature = "protocol-errors")]
+    #[test]
+    fn conversion_impl_exists_for_mdns_error() {
+        fn assert_into<E: Into<RmpdError>>() {}
+        assert_into::<mdns_sd::Error>();
+    }
+}

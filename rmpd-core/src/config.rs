@@ -1094,6 +1094,57 @@ port = 6611
     }
 
     #[test]
+    fn audio_device_is_trimmed_and_has_priority_over_output_blocks() {
+        let mut c = Config::default();
+        c.audio.device = Some("  hw:CARD=2,DEV=0  ".to_owned());
+        c.output.push(output_block(true));
+
+        assert_eq!(c.output_device().as_deref(), Some("hw:CARD=2,DEV=0"));
+    }
+
+    #[test]
+    fn empty_audio_device_falls_back_to_first_enabled_output_device() {
+        let mut c = Config::default();
+        c.audio.device = Some("   ".to_owned());
+
+        let mut disabled = output_block(false);
+        disabled.settings.insert(
+            "device".to_owned(),
+            toml::Value::String("hw:CARD=9,DEV=9".to_owned()),
+        );
+        c.output.push(disabled);
+
+        let mut enabled = output_block(true);
+        enabled.settings.insert(
+            "device".to_owned(),
+            toml::Value::String("  hw:CARD=3,DEV=1  ".to_owned()),
+        );
+        c.output.push(enabled);
+
+        assert_eq!(c.output_device().as_deref(), Some("hw:CARD=3,DEV=1"));
+    }
+
+    #[test]
+    fn dop_mode_accepts_boolean_and_string_output_settings() {
+        let mut c = Config::default();
+        c.audio.dop = DopMode::No;
+
+        let mut disabled = output_block(false);
+        disabled
+            .settings
+            .insert("dop".to_owned(), toml::Value::Boolean(true));
+        c.output.push(disabled);
+
+        let mut enabled = output_block(true);
+        enabled
+            .settings
+            .insert("dop".to_owned(), toml::Value::String("on".to_owned()));
+        c.output.push(enabled);
+
+        assert_eq!(c.dop_mode(), DopMode::Yes);
+    }
+
+    #[test]
     fn ensure_directories_creates_configured_dirs() {
         let base = unique_temp_dir("ensuredirs");
 
@@ -1473,6 +1524,59 @@ some_backend_specific_key = 1
                 .any(|d| d.level == DiagLevel::Warn && d.message.contains("log_level")),
             "got: {:?}",
             load.diagnostics
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn invalid_audio_values_are_clamped_with_diagnostics() {
+        let base = unique_temp_dir("audioclamp");
+        let music = base.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+
+        let path = base.join("rmpd.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[general]\nmusic_directory = \"{music}\"\n[audio]\n\
+                 buffer_time = 0\ncrossfade = -2.5\n\
+                 replay_gain_preamp = 123.0\nreplay_gain_missing_preamp = -999.0\n"
+            ),
+        )
+        .unwrap();
+
+        let load = Config::discover(Some(path.as_std_path()), DiscoverOptions::default()).unwrap();
+
+        assert_eq!(load.config.audio.buffer_time, default_buffer_time());
+        assert_eq!(load.config.audio.crossfade, 0.0);
+        assert_eq!(load.config.audio.replay_gain_preamp, 60.0);
+        assert_eq!(load.config.audio.replay_gain_missing_preamp, -60.0);
+
+        let messages: Vec<&str> = load.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("audio.buffer_time was 0; clamped")),
+            "got: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("audio.crossfade was negative; clamped to 0.0")),
+            "got: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("audio.replay_gain_preamp") && m.contains("clamped to 60")),
+            "got: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| {
+                m.contains("audio.replay_gain_missing_preamp") && m.contains("clamped to -60")
+            }),
+            "got: {messages:?}"
         );
 
         let _ = std::fs::remove_dir_all(&base);

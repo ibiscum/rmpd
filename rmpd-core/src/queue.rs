@@ -469,6 +469,14 @@ mod tests {
     use super::*;
     use crate::test_utils::create_test_song;
 
+    fn make_queue_with_n(n: u32) -> Queue {
+        let mut queue = Queue::new();
+        for i in 0..n {
+            queue.add(create_test_song(i as u64, &i.to_string()));
+        }
+        queue
+    }
+
     #[test]
     fn test_shuffle_range() {
         let mut queue = Queue::new();
@@ -515,5 +523,209 @@ mod tests {
 
         // Should still have 5 items
         assert_eq!(queue.len(), 5);
+    }
+
+    #[test]
+    fn delete_and_delete_id_reindex_and_update_version() {
+        let mut queue = make_queue_with_n(4);
+        let v0 = queue.version();
+
+        let removed = queue.delete(1).expect("position 1 should exist");
+        assert_eq!(removed.position, 1);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.version(), v0 + 1);
+        assert_eq!(queue.get(0).expect("item 0").position, 0);
+        assert_eq!(queue.get(1).expect("item 1").position, 1);
+        assert_eq!(queue.get(2).expect("item 2").position, 2);
+
+        let delete_none_version = queue.version();
+        assert!(queue.delete(99).is_none());
+        assert_eq!(queue.version(), delete_none_version);
+
+        let id = queue.get(1).expect("item 1 exists").id;
+        let by_id = queue.delete_id(id).expect("id should exist");
+        assert_eq!(by_id.id, id);
+        assert_eq!(queue.len(), 2);
+
+        let delete_missing_id_version = queue.version();
+        assert!(queue.delete_id(999_999).is_none());
+        assert_eq!(queue.version(), delete_missing_id_version);
+    }
+
+    #[test]
+    fn clear_resets_items_and_last_loaded_playlist_and_bumps_version() {
+        let mut queue = make_queue_with_n(2);
+        queue.set_last_loaded_playlist("favorites");
+        let v0 = queue.version();
+
+        queue.clear();
+
+        assert!(queue.is_empty());
+        assert_eq!(queue.last_loaded_playlist(), "");
+        assert_eq!(queue.version(), v0 + 1);
+    }
+
+    #[test]
+    fn add_at_inserts_or_appends_and_reindexes() {
+        let mut queue = make_queue_with_n(3);
+
+        let inserted_id = queue.add_at(create_test_song(42, "insert"), Some(1));
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue.get(1).expect("inserted item").id, inserted_id);
+        assert_eq!(queue.get(1).expect("inserted item").position, 1);
+        assert_eq!(queue.get(2).expect("shifted item").position, 2);
+
+        let appended_id = queue.add_at(create_test_song(43, "append"), Some(99));
+        assert_eq!(queue.get(4).expect("appended item").id, appended_id);
+
+        let none_pos_id = queue.add_at(create_test_song(44, "none"), None);
+        assert_eq!(queue.get(5).expect("none-pos append").id, none_pos_id);
+    }
+
+    #[test]
+    fn move_and_swap_obey_bounds_and_reindex() {
+        let mut queue = make_queue_with_n(4);
+        let id0 = queue.get(0).expect("item 0").id;
+        let id1 = queue.get(1).expect("item 1").id;
+
+        assert!(queue.move_item(0, 2));
+        assert_eq!(queue.get(2).expect("moved item").id, id0);
+        assert_eq!(queue.get(0).expect("new item 0").id, id1);
+        assert_eq!(queue.get(2).expect("reindexed").position, 2);
+
+        let v_after_move = queue.version();
+        assert!(!queue.move_item(99, 0));
+        assert!(!queue.move_item(0, 99));
+        assert_eq!(queue.version(), v_after_move);
+
+        let id_at_0 = queue.get(0).expect("item").id;
+        let id_at_1 = queue.get(1).expect("item").id;
+        assert!(queue.swap(0, 1));
+        assert_eq!(queue.get(0).expect("swapped").id, id_at_1);
+        assert_eq!(queue.get(1).expect("swapped").id, id_at_0);
+
+        let v_after_swap = queue.version();
+        assert!(!queue.swap(0, 99));
+        assert_eq!(queue.version(), v_after_swap);
+    }
+
+    #[test]
+    fn move_and_swap_by_id_handle_missing_ids() {
+        let mut queue = make_queue_with_n(3);
+        let id0 = queue.get(0).expect("item").id;
+        let id2 = queue.get(2).expect("item").id;
+
+        assert!(queue.move_by_id(id0, 2));
+        assert_eq!(queue.get(2).expect("moved").id, id0);
+
+        let v_after_move = queue.version();
+        assert!(!queue.move_by_id(999_999, 0));
+        assert!(!queue.move_by_id(id2, 99));
+        assert_eq!(queue.version(), v_after_move);
+
+        assert!(queue.swap_by_id(id0, id2));
+        let v_after_swap = queue.version();
+        assert!(!queue.swap_by_id(id0, 777_777));
+        assert_eq!(queue.version(), v_after_swap);
+    }
+
+    #[test]
+    fn priority_range_ids_and_range_updates_follow_version_rules() {
+        let mut queue = make_queue_with_n(4);
+        let id0 = queue.get(0).expect("item").id;
+        let id1 = queue.get(1).expect("item").id;
+
+        let v0 = queue.version();
+        assert!(queue.set_priority_range(7, &[(1, 3)]));
+        assert_eq!(queue.get(1).expect("item").priority, 7);
+        assert_eq!(queue.get(2).expect("item").priority, 7);
+        assert_eq!(queue.version(), v0 + 1);
+
+        let v1 = queue.version();
+        assert!(!queue.set_priority_range(7, &[(1, 3)]));
+        assert_eq!(queue.version(), v1);
+
+        let v2 = queue.version();
+        assert!(queue.set_priority_ids(9, &[id0, id1, 999_999]));
+        assert_eq!(queue.get_by_id(id0).expect("item").priority, 9);
+        assert_eq!(queue.get_by_id(id1).expect("item").priority, 9);
+        assert_eq!(queue.version(), v2 + 1);
+
+        let v3 = queue.version();
+        assert!(!queue.set_priority_ids(1, &[555_555]));
+        assert_eq!(queue.version(), v3);
+
+        let v4 = queue.version();
+        assert!(queue.set_range_by_id(id0, Some((1.5, 3.0))));
+        assert_eq!(queue.version(), v4 + 1);
+
+        let v5 = queue.version();
+        assert!(queue.set_range_by_id(id0, Some((1.5, 3.0))));
+        assert_eq!(queue.version(), v5);
+
+        let v6 = queue.version();
+        assert!(!queue.set_range_by_id(111_111, Some((0.0, 1.0))));
+        assert_eq!(queue.version(), v6);
+    }
+
+    #[test]
+    fn tag_add_and_clear_behave_and_version_only_changes_on_mutation() {
+        let mut queue = make_queue_with_n(1);
+        let id = queue.get(0).expect("item").id;
+
+        let v0 = queue.version();
+        assert!(queue.add_tag_by_id(id, "mood".to_owned(), "calm".to_owned()));
+        assert_eq!(queue.version(), v0 + 1);
+        assert_eq!(
+            queue
+                .get_by_id(id)
+                .and_then(|i| i.tags.as_ref())
+                .and_then(|m| m.get("mood"))
+                .map(String::as_str),
+            Some("calm")
+        );
+
+        let v1 = queue.version();
+        assert!(queue.add_tag_by_id(id, "mood".to_owned(), "calm".to_owned()));
+        assert_eq!(queue.version(), v1);
+
+        let v2 = queue.version();
+        assert!(queue.clear_tags_by_id(id, Some("missing")));
+        assert_eq!(queue.version(), v2);
+
+        let v3 = queue.version();
+        assert!(queue.clear_tags_by_id(id, Some("mood")));
+        assert_eq!(queue.version(), v3 + 1);
+        assert!(queue.get_by_id(id).expect("item").tags.is_none());
+
+        assert!(queue.add_tag_by_id(id, "genre".to_owned(), "rock".to_owned()));
+        let v4 = queue.version();
+        assert!(queue.clear_tags_by_id(id, None));
+        assert_eq!(queue.version(), v4 + 1);
+
+        let v5 = queue.version();
+        assert!(queue.clear_tags_by_id(id, None));
+        assert_eq!(queue.version(), v5);
+
+        assert!(!queue.add_tag_by_id(999_999, "x".to_owned(), "y".to_owned()));
+        assert!(!queue.clear_tags_by_id(999_999, None));
+    }
+
+    #[test]
+    fn allocate_id_never_returns_zero_after_restore_like_state() {
+        // Simulate old/restored state where next_id is 0.
+        let mut queue = Queue {
+            items: Vec::new(),
+            next_id: 0,
+            version: 0,
+            last_loaded_playlist: String::new(),
+        };
+
+        let id1 = queue.add(create_test_song(1, "a"));
+        let id2 = queue.add(create_test_song(2, "b"));
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert!(queue.items().iter().all(|it| it.id != 0));
     }
 }

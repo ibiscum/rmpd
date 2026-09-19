@@ -13,7 +13,8 @@ fn storage_mount_rejects_invalid_uri_format() {
     match err {
         RmpdError::Storage(msg) => {
             assert!(
-                msg.contains("Invalid URI format") || msg.contains("not supported on this platform"),
+                msg.contains("Invalid URI format")
+                    || msg.contains("not supported on this platform"),
                 "unexpected storage error: {msg}"
             );
         }
@@ -25,13 +26,18 @@ fn storage_mount_rejects_invalid_uri_format() {
 fn storage_mount_rejects_unsupported_protocol() {
     let backend = get_default_backend();
     let err = backend
-        .mount("ftp://example.com/music", Path::new("/tmp/rmpd-core-mount-test"), &[])
+        .mount(
+            "ftp://example.com/music",
+            Path::new("/tmp/rmpd-core-mount-test"),
+            &[],
+        )
         .expect_err("unsupported protocol should fail");
 
     match err {
         RmpdError::Storage(msg) => {
             assert!(
-                msg.contains("Unsupported protocol") || msg.contains("not supported on this platform"),
+                msg.contains("Unsupported protocol")
+                    || msg.contains("not supported on this platform"),
                 "unexpected storage error: {msg}"
             );
         }

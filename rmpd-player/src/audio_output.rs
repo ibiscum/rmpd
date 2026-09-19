@@ -150,7 +150,9 @@ mod tests {
     #[test]
     fn write_before_start_returns_error() {
         let mut out = DummyOutput::default();
-        let err = out.write(&[0.0, 0.1]).expect_err("write before start must fail");
+        let err = out
+            .write(&[0.0, 0.1])
+            .expect_err("write before start must fail");
         assert!(err.to_string().contains("Output not started"));
     }
 
@@ -169,7 +171,8 @@ mod tests {
         assert_eq!(out.written_samples, 3);
 
         out.resume().expect("resume should succeed");
-        out.write(&[0.5]).expect("write after resume should succeed");
+        out.write(&[0.5])
+            .expect("write after resume should succeed");
         assert_eq!(out.written_samples, 4);
     }
 

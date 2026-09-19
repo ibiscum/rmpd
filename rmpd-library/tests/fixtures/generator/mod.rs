@@ -4,7 +4,10 @@
 /// Files are cached in target/test-fixtures/ to avoid regenerating on each test run.
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 use tempfile::TempDir;
 
 pub use rmpd_core::test_utils::AudioFormat;
@@ -47,7 +50,11 @@ pub struct FixtureGenerator {
 }
 
 impl FixtureGenerator {
-    fn metadata_fingerprint(format: AudioFormat, metadata: &TestMetadata, with_artwork: bool) -> u64 {
+    fn metadata_fingerprint(
+        format: AudioFormat,
+        metadata: &TestMetadata,
+        with_artwork: bool,
+    ) -> u64 {
         let mut hasher = DefaultHasher::new();
         format.extension().hash(&mut hasher);
         metadata.title.hash(&mut hasher);
@@ -372,7 +379,10 @@ mod tests {
         };
 
         // Sanitized visible prefixes collide, but fingerprint suffix must differ.
-        assert_eq!(sanitize_for_filename(&m1.title), sanitize_for_filename(&m2.title));
+        assert_eq!(
+            sanitize_for_filename(&m1.title),
+            sanitize_for_filename(&m2.title)
+        );
         let k1 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m1, false);
         let k2 = FixtureGenerator::build_cache_key(AudioFormat::Flac, &m2, false);
         assert_ne!(k1, k2);

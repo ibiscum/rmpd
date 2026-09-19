@@ -20,7 +20,9 @@ fn parse_uri(uri: &str) -> Result<(String, String)> {
 fn validate_mount_options(options: &[String]) -> Result<()> {
     for opt in options {
         if opt.trim().is_empty() {
-            return Err(RmpdError::Storage("Invalid mount option: empty option".to_string()));
+            return Err(RmpdError::Storage(
+                "Invalid mount option: empty option".to_string(),
+            ));
         }
         if opt.contains(',') {
             return Err(RmpdError::Storage(format!(
@@ -372,6 +374,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_uri_normalizes_protocol_and_trims() {
+        let (proto, addr) = parse_uri("  SMB:// server/share  ").unwrap();
+        assert_eq!(proto, "smb");
+        assert_eq!(addr, "server/share");
+    }
+
+    #[test]
     fn test_validate_mount_options_rejects_invalid_inputs() {
         assert!(validate_mount_options(&["".to_string()]).is_err());
         assert!(validate_mount_options(&["user,name=foo".to_string()]).is_err());
@@ -387,6 +396,7 @@ mod tests {
     fn test_has_username_option_exact_key_only() {
         assert!(has_username_option(&["username=alice".to_string()]));
         assert!(has_username_option(&["username".to_string()]));
+        assert!(has_username_option(&["  username=bob".to_string()]));
         assert!(!has_username_option(&["notusername=alice".to_string()]));
         assert!(!has_username_option(&["guest".to_string()]));
     }
@@ -405,6 +415,49 @@ mod tests {
             "umount: /tmp/x: not currently mounted"
         ));
         assert!(!is_already_unmounted_message("permission denied"));
+    }
+
+    #[test]
+    fn test_path_to_str_valid_utf8_path() {
+        let p = Path::new("/tmp/music");
+        assert_eq!(path_to_str(p).unwrap(), "/tmp/music");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_to_str_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = b"/tmp/invalid-\xff";
+        let non_utf8 = Path::new(OsStr::from_bytes(bytes));
+        let err = path_to_str(non_utf8).unwrap_err();
+        assert!(err.to_string().contains("Invalid UTF-8 in path"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_execute_mount_command_rejects_invalid_options_before_spawn() {
+        let backend = LinuxMountBackend::new();
+        let err = backend
+            .execute_mount_command(
+                "nfs",
+                "server:/music",
+                "/mnt/music",
+                &["user,name=bad".to_string()],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid mount option"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_output_parser_ignores_malformed_lines() {
+        let out = "garbage line\n/dev/disk1s1 on / (apfs, local, read-only)\n";
+        assert!(!mount_output_contains_mountpoint(out, "/mnt/music"));
+        assert!(mount_output_contains_mountpoint(out, "/"));
     }
 
     #[test]

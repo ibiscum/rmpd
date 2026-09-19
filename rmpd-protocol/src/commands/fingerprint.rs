@@ -182,7 +182,10 @@ mod tests {
 
         let response = handle_getfingerprint_command(&state, "../etc/passwd").await;
 
-        assert!(response.starts_with("ACK [2@0] {getfingerprint}"), "got: {response}");
+        assert!(
+            response.starts_with("ACK [2@0] {getfingerprint}"),
+            "got: {response}"
+        );
         assert!(response.contains("Malformed path"), "got: {response}");
     }
 }
