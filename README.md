@@ -295,7 +295,7 @@ password = "secret"                # or use `api_key = "..."` instead
 # max_bitrate = 320                 # optional server-side transcode cap (kbps)
 # format = "raw"                    # optional transcode target ("raw" = no transcode)
 # allow_insecure_http = true         # optional: permit non-HTTPS server URL
-# accept_invalid_certs = true        # optional: allow invalid TLS certs (insecure)
+# accept_invalid_certs = false       # optional: explicit false only; true is rejected
 ```
 
 Credentials are never written to logs. An unreachable server is skipped at
