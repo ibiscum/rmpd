@@ -111,5 +111,5 @@ filesystem_watch = true
 # # format = "raw"
 # # Optional: allow plain HTTP URLs (insecure; default false).
 # # allow_insecure_http = false
-# # Optional: skip TLS certificate validation (insecure; default false).
+# # Optional: explicit false only; true is rejected because it disables TLS certificate validation.
 # # accept_invalid_certs = false
